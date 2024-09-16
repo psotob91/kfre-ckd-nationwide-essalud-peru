@@ -1,0 +1,41 @@
+tidy_pool_coef <- function(results_stack, conf = 0.95, est0 = 0) {
+  
+  alpha <- 1 - conf
+  factor_levels <- unique(results_stack$term)
+  
+  results_stack <- results_stack |> 
+    mutate(term = factor(term, levels = factor_levels))
+  
+  m <- length(unique(results_stack$.imp))
+  k <- rep(4, 6)
+  
+  # Combina todos los tibbles en una lista en un único tibble  
+  final_estimates <- results_stack |> 
+    group_by(term) |> 
+    summarise(
+      means_pool = mean(means), 
+      estimate = mean(estimate_imp, na.rm = TRUE),
+      ubar = mean(std.error ^ 2, na.rm = TRUE),
+      b = var(estimate_imp, na.rm = TRUE),
+      n = mean(n, na.rm = TRUE)
+    ) |> 
+    ungroup() |> 
+    mutate(
+      m = m, 
+      t = ubar + b + b / m,
+      lambda = (b + b / m) / t, # prop of variance attribut to missing data
+      riv = (b + b / m) / ubar, # relat increa i var due to nonresp
+      k = k, 
+      dfold = (m - 1) / (lambda ^ 2),
+      dfcom = n - k, 
+      dfobs = ((dfcom + 1) / (dfcom + 3)) * dfcom * (1 - lambda), 
+      df = if_else(lambda == 0, dfcom, (dfold * dfobs) / (dfold + dfobs)),
+      fmi = ((riv + 2) / (df + 3)) / (1 + riv), 
+      ll = estimate - qt(1 - alpha / 2, df) * sqrt(t), 
+      ul = estimate + qt(1 - alpha / 2, df) * sqrt(t), 
+      pval = pf((est0 - estimate) ^ 2 / t, 1, df, lower.tail = FALSE)
+    ) |> 
+    select(term, means_pool, estimate, ll, ul, pval, ubar, b, t, dfcom, df, riv, lambda, fmi, n)
+  
+  return(final_estimates)
+}

@@ -1,0 +1,932 @@
+---
+title: "External validation, recalibration, and clinical utility of the prognostic model kidney failure risk equation in patients with CKD stages G3-4: a nationwide retrospective cohort analysis in Peru" 
+subtitle: "Main Analysis - Winsorization 1.5%: 3. Descriptive Analysis"
+author: "Percy Soto Becerra"
+format: 
+  html: 
+   theme: cerulean
+   toc: true
+   number-sections: true
+   df-print: paged
+   page-layout: full
+   embed-resources: true
+   cache: false
+execute: 
+  warning: false
+---
+
+## Setup
+
+```{r}
+#| label: load-packages
+#| include: true
+
+rm(list = ls())
+
+
+# Use pacman to check whether packages are installed, if not load
+if (!require("pacman")) install.packages("pacman")
+library(pacman)
+
+# Unload all package to begin in a session with only base packages
+pacman::p_unload(all)
+
+# Install packages
+pacman::p_load(
+  here, 
+  rio, 
+  tidyverse, 
+  janitor, 
+  knitr, 
+  kableExtra,
+  flextable, 
+  gtsummary,
+  patchwork,
+  cowplot, 
+  kableExtra,
+  ggsci, 
+  scales, 
+  mice, 
+  sf, 
+  rnaturalearth, 
+  viridis,
+  RColorBrewer,
+  ggmagnify, 
+  survival, 
+  tidycmprsk, 
+  cmprsk,
+  survminer
+)
+
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+
+mypal <- pal_npg("nrc")(9)
+mypal
+## Revisar:; https://amices.org/ggmice/index.html
+options(expressions = 500000)
+```
+
+## Load data 
+
+```{r}
+# Import data
+imp.datosA <- readRDS(here::here("Data", "Tidy", "Sensitivity-woWinsorize", "data_impA.rds")) 
+
+# Create data for CKD 3b-4 (subset of CKD3a-4)
+imp.datosA <- imp.datosA |> 
+  mutate(grf_cat = droplevels(grf_cat)) 
+```
+
+## Pre-processing data
+
+```{r}
+nsize <- nrow(imp.datosA |> filter(.imp == 0))
+
+imp.datosA <- imp.datosA |> 
+  mutate(
+    acr = exp(log_acr), 
+    urine_crea = exp(log_urine_crea), 
+    urine_album = exp(log_urine_album), 
+    acr_cat = case_when(acr < 30 ~ "A1", 
+                        acr <= 300 & acr >= 30 ~ "A2", 
+                        acr > 300 ~ "A3", 
+                        TRUE ~ as.character(NA)),
+    ckd_class = case_when(
+      grf_cat %in% c("G1", "G2") & acr_cat == "A1" ~ "Low risk", 
+      (grf_cat %in% c("G3a") & acr_cat == "A1") | 
+        (grf_cat %in% c("G1", "G2") & acr_cat == "A2") ~ "Moderately increased risk", 
+      (grf_cat %in% c("G3b") & acr_cat == "A1") | 
+        (grf_cat == "G3a" & acr_cat == "A2") | 
+        (grf_cat %in% c("G1", "G2") & acr_cat == "A3") ~ "High risk", 
+      (grf_cat %in% c("G4", "G5") & acr_cat == "A1") | 
+        (grf_cat %in% c("G3b", "G4", "G5") & acr_cat == "A2") | 
+        (grf_cat %in% c("G3a", "G3b", "G4", "G5") & acr_cat == "A3") ~ "Very high risk"
+    ), 
+    ckd_class = factor(ckd_class, 
+                       levels = c("Low risk", "Moderately increased risk", 
+                                  "High risk", "Very high risk")), 
+    # cas = fct_rev(fct_infreq(cas)), 
+    # cas2 = fct_rev(fct_infreq(cas2)), 
+    acr_miss = if_else(!is.na(acr), "All variable with complete data", "At least 1 variable with missing data"), 
+    across(c(hta, dm, death2y, death5y), ~ 
+             case_when(.x == "1" ~ "Yes", 
+                       .x == "0" ~ "No",
+                       TRUE ~ as.character(NA))), 
+    region_peru = case_when(
+      cas %in% c("Lima - Sabogal", 
+                 "Lima - Almenara", 
+                 "Lima - Rebagliati") ~ "Lima Metropolitana",
+      cas == "Amazonas" ~ "Amazonas",
+      cas == "Ancash" ~ "Ancash",
+      cas == "Apurimac" ~ "Apurímac",
+      cas == "Arequipa" ~ "Arequipa",
+      cas == "Ayacucho" ~ "Ayacucho",
+      cas == "Cajamarca" ~ "Cajamarca",
+      cas == "Cusco" ~ "Cusco",
+      cas == "Huancavelica" ~ "Huancavelica",
+      cas == "Huanuco" ~ "Huánuco",
+      cas == "Huaraz" ~ "Ancash",
+      cas == "Juliaca" ~ "Puno",
+      cas == "Junin" ~ "Junín",
+      cas == "Lambayeque" ~ "Lambayeque",
+      cas == "La Libertad" ~ "La Libertad",
+      cas == "Loreto" ~ "Loreto",
+      cas == "Madre De Dios" ~ "Madre de Dios",
+      cas == "Moquegua" ~ "Moquegua",
+      cas == "Moyobamba" ~ "San Martín",
+      cas == "Pasco" ~ "Pasco",
+      cas == "Piura" ~ "Piura",
+      cas == "Puno" ~ "Puno",
+      cas == "Ica" ~ "Ica",
+      cas == "Tacna" ~ "Tacna",
+      cas == "Tarapoto" ~ "San Martín",
+      cas == "Tumbes" ~ "Tumbes",
+      cas == "Ucayali" ~ "Ucayali",
+      TRUE ~ "Other" # Para manejar cualquier otro caso no contemplado
+    ), 
+    cas = case_when(
+      cas %in% c("KAELIN", "Lima - Rebagliati: JB") ~ "Lima: Rebagliati",
+      cas == "Lima - Almenara" ~ "Lima: Almenara",
+      cas == "Lima - Sabogal" ~ "Lima y Callao: Sabogal",
+      cas == "Amazonas" ~ "Amazonas",
+      cas == "Ancash" ~ "Ancash: Anchas (except Huaraz)",
+      cas == "Apurimac" ~ "Apurímac",
+      cas == "Arequipa" ~ "Arequipa",
+      cas == "Ayacucho" ~ "Ayacucho",
+      cas == "Cajamarca" ~ "Cajamarca",
+      cas == "Cusco" ~ "Cusco",
+      cas == "Huancavelica" ~ "Huancavelica",
+      cas == "Huanuco" ~ "Huánuco",
+      cas == "Huaraz" ~ "Ancash: Huaraz",
+      cas == "Juliaca" ~ "Puno: Juliaca",
+      cas == "Junin" ~ "Junín",
+      cas == "Lambayeque" ~ "Lambayeque",
+      cas == "La Libertad" ~ "La Libertad",
+      cas == "Loreto" ~ "Loreto",
+      cas == "Madre De Dios" ~ "Madre de Dios",
+      cas == "Moquegua" ~ "Moquegua",
+      cas == "Moyobamba" ~ "San Martín: Moyobamba",
+      cas == "Pasco" ~ "Pasco",
+      cas == "Piura" ~ "Piura",
+      cas == "Puno" ~ "Puno: Puno (except Juliaca)",
+      cas == "Ica" ~ "Ica",
+      cas == "Tacna" ~ "Tacna",
+      cas == "Tarapoto" ~ "San Martín",
+      cas == "Tumbes" ~ "Tumbes",
+      cas == "Ucayali" ~ "Ucayali",
+      TRUE ~ "Other" # Para manejar cualquier otro caso no contemplado
+    ), 
+    cas_cat = case_when(
+      region_peru %in% c("Lima Metropolitana") ~ "Metropolitan Lima",
+      TRUE ~ "Other Regions"
+    ), 
+    risk2y = kfre_pr(imp.datosA, 2),
+    risk5y = kfre_pr(imp.datosA, 5)) |> 
+  labelled::set_variable_labels(
+    sex = "Sex", 
+    age = "Age (years)", 
+    cas = "EsSalud Network", 
+    cas_cat = "EsSalud Network", 
+    crea = "Serum Creatinine (mg/dL)", 
+    eGFR_ckdepi = "eGFR using CKD-EPI (ml/min/1.73m²)", 
+    acr = "Albumin-Creatinine Ratio (mg/g)", 
+    urine_album = "Urine Albumin (mg/dl)", 
+    urine_crea = "Urine Creatinine (mg/dL)", 
+    hta = "Hypertension", 
+    dm = "Diabetes Mellitus", 
+    grf_cat = "eGFR Categories", 
+    acr_cat = "Persistent Albuminuria Categories", 
+    ckd_class = "CKD KDIGO Classification", 
+    eventd5ylab = "5-Year Outcome", 
+    eventd2ylab = "2-Year Outcome", 
+    eventd5y = "5-Year Outcome", 
+    death5y = "5-Year Mortality", 
+    death2y = "2-Year Mortality")
+```
+
+## Table 1
+
+```{r}
+# Tabla 1a
+survey::svydesign(~1, data = imp.datosA |> filter(.imp != 0), weights = ~wg) %>%
+  gtsummary::tbl_svysummary(
+    include = c(sex, age, cas_cat, hta, dm, acr_cat, grf_cat, ckd_class, crea,
+                eGFR_ckdepi, acr, urine_album, urine_crea,  death2y, 
+                eventd2ylab, death5y, eventd5ylab), 
+    type = list(all_continuous() ~ "continuous2", 
+                c(hta, dm, death2y, death5y) ~ "categorical"),
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing"
+  ) |> 
+  bold_labels() |>  
+  modify_caption("Table 1. Baseline characteristics of the study population") |> 
+  modify_footnote(everything() ~ NA) -> tab1a
+
+tab1a |>  
+  as_flex_table() |>  
+  flextable::save_as_docx(path = here("Tables", "Sensitivity-woWinsorize", "Table1_Imputed.docx"))
+
+tab1a |>  
+  gtsummary::as_kable_extra() |> 
+  kableExtra::kable_styling("striped")
+```
+
+## Table Sup - Comparison between Imputed, Available and CCA analysis
+
+```{r}
+# Tabla S1b . Available data 
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  gtsummary::tbl_summary(
+    include = c(sex, age, cas_cat, hta, dm, acr_cat, grf_cat, ckd_class, crea,
+                eGFR_ckdepi, acr, urine_album, urine_crea,  death2y, 
+                eventd2ylab, death5y, eventd5ylab), 
+    type = list(all_continuous() ~ "continuous2", 
+                c(hta, dm, death2y, death5y) ~ "categorical"),
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing"
+  ) |> 
+  bold_labels()  |>   
+  modify_footnote(everything() ~ NA) -> tabS1a_available
+
+# Tabla S1b . Available data 
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  gtsummary::tbl_summary(
+    include = c(sex, age, cas_cat, hta, dm, acr_cat, grf_cat, ckd_class, crea,
+                eGFR_ckdepi, acr, urine_album, urine_crea,  death2y, 
+                eventd2ylab, death5y, eventd5ylab), 
+    by = acr_miss,
+    type = list(all_continuous() ~ "continuous2", 
+                c(hta, dm, death2y, death5y) ~ "categorical"),
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing", 
+    percent = "row"
+  ) |> 
+  bold_labels() |>  
+  add_p(include = c(sex, age, cas_cat, hta, dm, grf_cat, crea,
+                eGFR_ckdepi, urine_album, urine_crea,  death2y, 
+                eventd2ylab, death5y, eventd5ylab)) |>  
+  separate_p_footnotes() |>  
+  modify_footnote(everything() ~ NA) -> tabS1a_miss
+
+tbl_merge(list(tab1a, tabS1a_available, tabS1a_miss), 
+          tab_spanner = c("**Imputed Data**\n**(% col)**", 
+                          "**Available Data**\n**(% col)**", 
+                          "**Complete data in all variables used for multiple imputation**\n**(% row)**")) |>  
+  modify_caption("Table. Baseline characteristics of the study population with CKD Stages 3a-3b-4 according missing data in KFRE's predicted risk") |> 
+  bold_labels() -> tabS1
+
+tabS1 %>% 
+  as_flex_table() %>% 
+  flextable::save_as_docx(path = here("Tables", "Sensitivity-woWinsorize", "Table_Sup_S1_by_missing_3a4.docx"))
+
+tabS1 %>% 
+  gtsummary::as_kable_extra() %>%
+  kableExtra::kable_styling("striped")
+```
+
+## Table Sup  - Comparison between Outcome distribution 
+
+```{r}
+# Tabla 1a
+survey::svydesign(~1, data = imp.datosA |> filter(.imp != 0), weights = ~wg) %>%
+  gtsummary::tbl_svysummary(
+    include = c(sex, age, cas_cat, hta, dm, acr_cat, grf_cat, ckd_class, crea,
+                eGFR_ckdepi, acr, urine_album, urine_crea,  death2y, 
+                eventd2ylab, death5y, eventd5ylab), 
+    type = list(all_continuous() ~ "continuous2", 
+                c(hta, dm, death2y, death5y) ~ "categorical"),
+    by = eventd5ylab, 
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing", 
+    percent = "row"
+  ) |> 
+  bold_labels() |>  
+  modify_footnote(everything() ~ NA) -> tabS2a
+
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  gtsummary::tbl_summary(
+    include = c(sex, age, cas_cat, hta, dm, acr_cat, grf_cat, ckd_class, crea,
+                eGFR_ckdepi, acr, urine_album, urine_crea,  death2y, 
+                eventd2ylab, death5y, eventd5ylab), 
+    by = eventd5ylab, 
+    type = list(all_continuous() ~ "continuous2", 
+                c(hta, dm, death2y, death5y) ~ "categorical"),
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing", 
+    percent = "row"
+  ) |> 
+  bold_labels() |>  
+  modify_footnote(everything() ~ NA) -> tabS2b
+
+tbl_merge(list(tabS2a, tabS2b), 
+          tab_spanner = c("**Imputed Data**\n**(% columna)**", 
+                          "**Availabe Data**\n**(% fila)**")) |>  
+  modify_caption("Table. Baseline characteristics of the study population with CKD Stages 3a-3b-4 according missing data in KFRE's predicted risk") |> 
+  bold_labels() -> tabS2
+
+tabS2 %>% 
+  as_flex_table() %>% 
+  flextable::save_as_docx(path = here("Tables", "Sensitivity-woWinsorize", "Table_Sup_S2_Outcome_by_missing_3a4.docx"))
+
+tabS2 %>% 
+  gtsummary::as_kable_extra() %>%
+  kableExtra::kable_styling("striped")
+```
+
+## Table Sup  - Distribution of Healthcare's Networks with data from VISARE
+
+```{r}
+# Tabla 1a
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  gtsummary::tbl_summary(
+    include = c(cas_cat, cas), 
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing"
+  ) |> 
+  bold_labels() |>  
+  modify_footnote(everything() ~ NA) -> tab_cas_overall
+
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  gtsummary::tbl_summary(
+    include = c(cas_cat, cas, eventd5ylab), 
+    by = eventd5ylab,
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing", 
+    percent = "row"
+  ) |> 
+  bold_labels() |>  
+  modify_footnote(everything() ~ NA) -> tab_cas_out
+
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  mutate(acr_miss = if_else(!is.na(acr), 
+                            "Datos completos", 
+                            "Datos perdidos")) |> 
+  gtsummary::tbl_summary(
+    include = c(cas_cat, cas), 
+    by = acr_miss,
+    statistic = all_continuous() ~ c(
+      "{mean} ({sd})",
+      "{median} ({p25} - {p75})", 
+      "{min} - {max}"
+    ),
+    digits = list(all_continuous() ~ c(1, 1, 1, 1), 
+                  all_categorical() ~ c(0, 1)), 
+    missing_text = "Missing", 
+    percent = "row"
+  ) |> 
+  bold_labels() |> 
+  modify_footnote(everything() ~ NA) -> tab_cas_miss
+
+tbl_merge(list(tab_cas_overall, tab_cas_miss, tab_cas_out), 
+          tab_spanner = c("**Total**", "Complete data in all variables used for multiple imputation
+(% row)", "**Outcome**")) %>% 
+  modify_caption("Table. EsSalud's Healthcare Networks distribution of the study population according missing data and outcome in 3a-3b-4 CKD Stages") %>% 
+  bold_labels() -> tab_cas
+
+tab_cas |>  
+  as_flex_table() |> 
+  flextable::save_as_docx(path = here("Tables", "Sensitivity-woWinsorize", "Table_Network_Dist.docx"))
+
+tab_cas |>  
+  gtsummary::as_kable_extra() |> 
+  kableExtra::kable_styling("striped")
+```
+
+## Coverage map of study population
+
+```{r}
+df <- imp.datosA |> 
+  filter(.imp == 0) |> 
+  count(region_peru) |> 
+  mutate(region_peru = if_else(region_peru == "Ancash", "Áncash", region_peru))
+
+# Obtener los límites de los departamentos del Perú
+peru_departments <- ne_states(country = "Peru", returnclass = "sf")
+
+# Crear una nueva columna 'name_grouped' donde agrupamos 'Lima', 'Lima Province' y 'Callao'
+peru_departments <- peru_departments %>%
+  mutate(name_grouped = case_when(
+    name %in% c("Lima", "Lima Province", "Callao") ~ "Lima Metropolitana",
+    TRUE ~ name
+  ))
+
+# Fusionar los polígonos de 'Lima', 'Lima Province' y 'Callao'
+peru_departments_grouped <- peru_departments %>%
+  group_by(name_grouped) %>%
+  summarize(geometry = st_union(geometry))
+
+# Filtrar los nombres de los departamentos
+peru_departments_grouped <- peru_departments_grouped  |>  
+  select(name_grouped)
+
+# Fusionar los datos geoespaciales con tu dataset
+merged_data <- peru_departments_grouped %>%
+  left_join(df, by = c("name_grouped" = "region_peru"))
+
+# Crear una nueva columna para los rangos de cobertura
+merged_data <- merged_data %>%
+  mutate(n_cat = cut(n, 
+                     breaks = c(-Inf, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, Inf), 
+                     labels = c("40-50", "50-100", "100-200", "200-500", "500-1000",  
+                                "1000 -2000", "2000-3000", "3000-5000", "5000-10000", "10000+")))
+
+# Obtener los límites de los países de Sudamérica
+south_america <- ne_countries(continent = "South America", returnclass = "sf")
+
+# Crear el mapa de Sudamérica
+map_south_america <- ggplot(data = south_america) +
+  geom_sf(fill = "white", color = "black") +
+  geom_sf(data = subset(south_america, name == "Peru"), fill = "grey70") +
+  geom_sf(data = merged_data, aes(fill = n_cat), alpha = 0.8) + 
+  scale_fill_brewer(palette = "Spectral", na.value = "grey50", direction = -1) +
+  theme_minimal() + 
+  theme(legend.position = "right") + 
+  coord_sf(xlim = c(-80, 15), 
+           ylim = c(-60, 20)) +  # Ajustar límites del eje X
+  labs(fill = "Sample Size")
+
+map_coverage <- map_south_america +
+  geom_magnify(aes(from = name == "Peru"), 
+               to = c(-30, 10, -50, 10), 
+               shadow = FALSE, 
+               linewidth = 0.4, 
+               colour = "black")
+
+ggsave(filename = "map_coverage.jpeg", 
+       plot = map_coverage, 
+       device = "jpeg",
+       path = here("Figures", "Sensitivity-woWinsorize"), 
+       scale = 3, 
+       width = 6, 
+       height = 6, 
+       units = "cm", 
+       dpi = 1000
+       )
+```
+
+```{r}
+include_graphics(here("Figures", "Sensitivity-woWinsorize", "map_coverage.jpeg"))
+```
+
+## Cumulative incidence function for competing risks data in all imputed data
+
+Figure shows the cumulative incidence curves of renal failure and pre-renal failure death in the study patients.
+
+```{r}
+# Seleccion del grupo 3a-4----
+dataA <- imp.datosA |> 
+  filter(.imp == 0) 
+
+tidycmprsk::cuminc(Surv(time, eventdf) ~ 1, dataA) -> cif
+
+cif |> 
+  tidy(times = 1:5) |> 
+  select(time, outcome, n.event, n.risk, n.censor, estimate, conf.low, conf.high) |> 
+  mutate(across(c(estimate, conf.low, conf.high), ~ round(100 * .x, 2)), 
+         outcome = as.character(outcome),
+         n = str_glue("{n.event} / {n.risk} ({n.censor})"), 
+         inc = str_glue("{estimate}% ({conf.low}% to {conf.high}%)")) |> 
+  select(time, outcome, n, inc) |> 
+  pivot_wider(id_cols = time, names_from = outcome, values_from = c(n, inc)) |> 
+  select(time, n_1, inc_1, n_2, inc_2) |> 
+  flextable() |> 
+    add_header_row(values = c("Year", "Kidney failure", "Death without kidney failure"), colwidths = c(1, 2, 2))  |> 
+  set_header_labels(
+    time = "Year", 
+    n_1 = "Event / Total (Censor)", 
+    inc_1 = "Cumulative Incidence (95%CI)", 
+    n_2 = "Event / Total (Censor)", 
+    inc_2 = "Cumulative Incidence (95%CI)" 
+  ) |> 
+  merge_v(j = 1, part = "header") |> 
+  set_caption("Table. Cumulative incidence of kidney failure and death without kidney failure in patients with CKD stages 3a-3b-4") %>% 
+  theme_box() |> 
+  autofit() -> tab_cif1
+
+tab_cif1 %>% 
+  save_as_docx(path = here("Tables", "Sensitivity-woWinsorize", "Table_CI_KF_3a4_imputed.docx"))
+
+tab_cif1
+```
+
+
+```{r}
+#| output: false
+
+# Seleccion del grupo 3a-4----
+dataA <- imp.datosA |> 
+  filter(.imp == 0)
+
+cmprsk::cuminc(ftime = dataA$time5y, 
+       fstatus = dataA$eventd5ylab, 
+       cencode = "Alive w/o Kidney Failure") -> cif
+
+ciplotdat <- 
+  cif %>% 
+  list_modify("Tests" = NULL) %>% 
+  map_df(`[`, c("time", "est", "var"), .id = "id") %>% 
+  mutate(id = recode(
+    id, 
+    "1 Death w/o Kidney Failure" = "Death w/o Kidney Failure", 
+    "1 Kidney Failure" = "Kidney Failure"), 
+    ll = est - 1.96 * sqrt(var), 
+    ul = est + 1.96 * sqrt(var)
+    ) %>% 
+  rename(
+    event = id
+  )
+
+ciplotdat %>% 
+  ggplot(aes(x = time, y = est)) +
+  geom_ribbon(aes(ymin = ll, ymax = ul, fill = event), 
+              alpha = 0.25, linetype = 0) + 
+  geom_step(lwd = 0.5, aes(color = event)) +
+  theme_survminer() +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) + 
+  labs(x = "Years", 
+       y = "Cumulative incidence",
+       title = NULL) + 
+  theme(legend.position = "top",
+        legend.title = element_blank(), 
+        legend.background = element_rect(fill = "white"), 
+        legend.key.size = unit(0.2, "cm")) -> g1
+
+ciplotdat %>% 
+  filter(event == "Kidney Failure") %>%
+  ggplot(aes(x = time, y = est)) +
+  geom_ribbon(aes(ymin = ll, ymax = ul), fill = "#89E1E3", 
+              alpha = 0.1, linetype = 0) + 
+  geom_step(lwd = 0.5, color = "#89E1E3") +
+  theme_survminer() +
+  ylim(c(0, 0.06)) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 0.06)) + 
+  labs(x = "", 
+       y = "",
+       title = "") -> g2
+
+kf_fit <- survfit(
+  Surv(time5y, ifelse(eventd5y != 0, 1, 0)) ~ 1, 
+  data = dataA
+)
+
+num <- ggsurvplot(
+  fit = kf_fit, 
+  risk.table = "nrisk_cumevents", 
+  risk.table.y.text = FALSE,
+  risk.table.y.text.col = FALSE, 
+  tables.y.text = FALSE, 
+  tables.y.text.col = FALSE, 
+  ylab = "Years",
+  risk.table.fontsize = 3,
+  tables.theme = theme_survminer(font.main = 9)
+  )
+
+cowplot::plot_grid(
+  g1, 
+  num$table + theme_cleantable(), 
+  nrow = 2, 
+  rel_heights = c(4, 1), 
+  align = "v", 
+  axis = "b"
+  ) -> g3
+
+g3 + inset_element(g2, 0.15, 0.50, 1, 0.94,  
+                   align_to = 'full',  
+                   ignore_tag = TRUE) -> plot_cif_mh
+
+ggsave(filename = "Plot_CIF_imputed.jpeg", 
+      plot = plot_cif_mh, 
+      device = "jpeg", 
+      path = here("Figures", "Sensitivity-woWinsorize"), 
+      dpi = 1000, 
+      scale = 2, 
+      width = 9,
+      height = 9, 
+      units = "cm", 
+      bg = "white")
+```
+
+```{r}
+#| fig-cap: "Cumulative incidence function curves for kidney failure (sky-blue line) and death before kidney failure (red line) in patients with (A) CKD stages 3a-3b-4 and (B) CKD stages 3b-4"
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "Plot_CIF_imputed.jpeg"))
+```
+
+## SFig - Predictors Distribution
+
+```{r}
+datos_viol_imp <- imp.datosA |> 
+  filter(.imp != 0) |> 
+  summarise(across(c(age, crea, eGFR_ckdepi, log_acr, log_urine_crea, 
+                     log_urine_album), ~mean(.x, na.rm = TRUE)), .by = .id) |> 
+  select(age, crea, eGFR_ckdepi, log_acr, log_urine_crea, log_urine_album) |> 
+  mutate(group = "Imputed") 
+  
+
+
+datos_viol <-  imp.datosA |> 
+  filter(.imp == 0) |> 
+  select(age, crea, eGFR_ckdepi, log_acr, log_urine_crea, log_urine_album) |> 
+  mutate(group = "Available data") |> 
+  bind_rows(datos_viol_imp) 
+
+p <- datos_viol |> 
+  pivot_longer(cols = c(age, crea, eGFR_ckdepi, log_acr, log_urine_crea, 
+                        log_urine_album), names_to = "predictor", 
+               values_to = "value") |> 
+  mutate(predictor = case_match(predictor, 
+                                "age" ~ "Age (years)", 
+                                "crea" ~ "Serum Creatinine (mg/dL)", 
+                                "eGFR_ckdepi" ~ "eGFR (ml/min/1.73m²)", 
+                                "log_acr" ~ "Log uACR (mg/g)", 
+                                "log_urine_crea" ~ "Log Urine Creatinine (mg/dL)", 
+                                "log_urine_album" ~ "Log Urine Albumin (mg/ml)", 
+                                .default = predictor)) |> 
+  ggviolin(x = "group", y = "value", fill = "group", 
+           add = "boxplot", 
+           add.params = list(fill = "white"), 
+           width = 0.5, 
+           alpha = 0.5) 
+
+p <- facet(p, facet.by = "predictor", scales = "free_y") + 
+  labs(x = NULL, y = NULL, fill = NULL) + 
+  scale_fill_npg("nrc")
+
+ggsave(filename = "predictor_dist_overall.jpeg", 
+       plot = p, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize"), 
+       scale = 2, 
+       width = 12, 
+       height = 8, 
+       units = "cm", 
+       dpi = 1000)
+```
+
+```{r}
+include_graphics(here("Figures", "Sensitivity-woWinsorize", "predictor_dist_overall.jpeg"))
+```
+
+
+## SFig - Predicted Risks Distribution
+
+```{r}
+datos_viol_imp <- imp.datosA |> 
+  filter(.imp != 0) |> 
+  summarise(across(c(risk2y, risk5y), ~mean(.x, na.rm = TRUE)), .by = .id) |> 
+  select(risk2y, risk5y) |> 
+  mutate(group = "Imputed") 
+
+datos_viol <-  imp.datosA |> 
+  filter(.imp == 0) |> 
+  summarise(across(c(risk2y, risk5y), ~mean(.x, na.rm = TRUE)), .by = .id) |> 
+  select(risk2y, risk5y) |> 
+  mutate(group = "Available data") |> 
+  bind_rows(datos_viol_imp)
+
+p1 <- datos_viol |> 
+  filter(group == "Available data") |> 
+  ggplot(aes(x = risk2y, y = stat(count / sum(count)))) + 
+  geom_histogram(bins = 30, fill = mypal[1], alpha = 0.5, color = "black", 
+                 linewidth = 0.1) + 
+  theme_classic() +
+  scale_y_continuous(labels = percent_format()) + 
+  labs(y = "%", x = "2-year KFRE's predicted risk", 
+       title = "Available data") + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+p2 <- imp.datosA |> 
+  filter(.imp != 0) |> 
+  ggplot(aes(x = risk2y, y = stat(count / sum(count)))) + 
+  geom_histogram(bins = 30, fill = mypal[2], alpha = 0.5, color = "black", 
+                 linewidth = 0.1) + 
+  theme_classic() +
+  scale_y_continuous(labels = percent_format()) + 
+  labs(y = "%", x = "2-year KFRE's predicted risk", 
+       title = "Imputed") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+p3 <- datos_viol |> 
+  filter(group == "Available data") |> 
+  ggplot(aes(x = risk5y, y = stat(count / sum(count)))) + 
+  geom_histogram(bins = 30, fill = mypal[1], alpha = 0.5, color = "black", 
+                 linewidth = 0.1) + 
+  theme_classic() +
+  scale_y_continuous(labels = percent_format()) + 
+  labs(y = "%", x = "5-year KFRE's predicted risk", 
+       title = "Available data") + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+p4 <- imp.datosA |> 
+  filter(.imp != 0) |> 
+  ggplot(aes(x = risk5y, y = stat(count / sum(count)))) + 
+  geom_histogram(bins = 30, fill = mypal[2], alpha = 0.5, color = "black", 
+                 linewidth = 0.1) + 
+  theme_classic() +
+  scale_y_continuous(labels = percent_format()) + 
+  labs(y = "%", x = "5-year KFRE's predicted risk", 
+       title = "Imputed") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+p_predicted <- (p1 / p2) | (p3 / p4)
+
+ggsave(filename = "predicted_risk.jpeg", 
+       plot = p_predicted, device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize"), 
+       scale = 2, 
+       width = 9, 
+       height = 12, 
+       units = "cm", 
+       dpi = 1000)
+```
+
+```{r}
+include_graphics(here("Figures", "Sensitivity-woWinsorize", "predicted_risk.jpeg"))
+```
+
+## Table Sup - Time distribution 
+
+- Time distribution in non-imputed data
+
+```{r}
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  summarise(median = median(time, na.rm = TRUE), 
+            min = min(time, na.rm = TRUE), 
+            p25 = quantile(time, probs = 0.25, na.rm = TRUE), 
+            p75 = quantile(time, probs = 0.75, na.rm = TRUE), 
+            max = max(time, na.rm = TRUE)) |> 
+  kbl() |> 
+  kable_styling()
+```
+
+- Time distribution in pooled data
+
+```{r}
+imp.datosA |> 
+  filter(.imp != 0) |> 
+  group_by(.imp) |> 
+  summarise(median = median(time, na.rm = TRUE), 
+            min = min(time, na.rm = TRUE), 
+            p25 = quantile(time, probs = 0.25, na.rm = TRUE), 
+            p75 = quantile(time, probs = 0.75, na.rm = TRUE), 
+            max = max(time, na.rm = TRUE)) |> 
+  ungroup() |> 
+  summarise(across(c(median, min, p25, p75, max), ~mean(.x, na.rm = TRUE))) |> 
+  kbl() |> 
+  kable_styling()
+```
+
+
+- Time distribution in each imputed dataset:
+
+```{r}
+imp.datosA |> 
+  group_by(.imp) |> 
+  summarise(median = median(time, na.rm = TRUE), 
+            min = min(time, na.rm = TRUE), 
+            p25 = quantile(time, probs = 0.25, na.rm = TRUE), 
+            p75 = quantile(time, probs = 0.75, na.rm = TRUE), 
+            max = max(time, na.rm = TRUE))  |> 
+  ungroup() |> 
+  kbl() |> 
+  kable_styling()
+```
+
+## Table Sup - Rates
+
+- Rates in non-imputed data
+
+```{r}
+imp.datosA |> 
+  filter(.imp == 0) |> 
+  summarise(rate = sum(eventd == 1) / (sum(time))) |> 
+  kbl() |> 
+  kable_styling()
+```
+
+- Rates in pooled imputed data
+
+```{r}
+imp.datosA |> 
+  filter(.imp != 0) |> 
+  group_by(.imp) |> 
+  summarise(rate = sum(eventd == 1) / (sum(time))) |> 
+  ungroup() |> 
+  summarise(across(c(rate), ~mean(.x, na.rm = TRUE))) |> 
+  kbl() |> 
+  kable_styling()
+```
+
+- Rates in each imputed data
+
+```{r}
+imp.datosA |> 
+  filter(.imp != 0) |> 
+  group_by(.imp) |> 
+  summarise(rate = sum(eventd == 1) / (sum(time))) |> 
+  ungroup() |> 
+  kbl() |> 
+  kable_styling()
+```
+
+## Table Sup  - Table Original Equations {#sec-tableS1}
+
+**Ecuaciones originales:**
+
+```{r}
+table_kfre <- data.frame(
+  pred = c("2-years", "5-years"), 
+  eq = c("$1-{0.9832}^{e^{(-0.2201\\times(\\frac{age}{10}-7.036)+0.2467\\times(male-0.5642)-0.5567\\times(\\frac{eGFR}{5}-7.222)+0.4510\\times(log{(ACR)}-5.137))}}$", 
+         "$1-{0.9365}^{e^{(-0.2201\\times(\\frac{age}{10}-7.036)+0.2467\\times(male-0.5642)-0.5567\\times(\\frac{eGFR}{5}-7.222)+0.4510\\times(log{(ACR)}-5.137))}}$")
+)
+```
+
+```{r}
+#| results: asis
+knitr::kable(table_kfre, escape = TRUE, 
+             col.names = c("Prediction horizons", 
+                           "Original regional equation calibrated for predicted risk of kidney failure"), 
+             caption = "Table. KFRE equations externally validated by the study") |> 
+  kable_styling()
+```
+
+
+## Table Sup  Coding 
+
+```{r}
+table_coding <- data.frame(
+  Variable = c("age", "male", "eGFR_ckdepi", "acr"), 
+  Coding = c("integer number that indicates the age in completed years", 
+             "1 = male; 0 = female", 
+             "estimated glomerular filtration rate obtained by CKD-EPI formula in $ml/min/1.73m^2$", 
+             "albumin-to-creatinine ratio in mg/g")
+)
+```
+
+
+```{r}
+#| results: asis
+knitr::kable(table_coding, escape = TRUE, 
+             caption = "Table. Coding of variables") |> 
+  kable_styling()
+```
+
+## Reproducibility Ticket
+
+```{r}
+#| label: repro_ticket
+#| column: page
+#| echo: true
+sessionInfo()
+```
+
+

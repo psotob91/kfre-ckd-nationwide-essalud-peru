@@ -1,0 +1,10 @@
+library(quarto)
+library(here)
+
+quarto_render(here("Code", "Main-Winsorize-1_5", "1_IDA.qmd"))
+quarto_render(here("Code", "Main-Winsorize-1_5", "2_Imputacion_Multiple.qmd"))
+quarto_render(here("Code", "Main-Winsorize-1_5", "3_Descriptive.qmd"))
+quarto_render(here("Code", "Main-Winsorize-1_5", "4_Val_Externa_Imputation.qmd"))
+quarto_render(here("Code", "Main-Winsorize-1_5", "5_Model_Recal_Imputed.qmd"))
+quarto_render(here("Code", "Main-Winsorize-1_5", "6_Val_Interna_Recal_Methods.qmd"))
+quarto_render(here("Code", "Main-Winsorize-1_5", "7_Util_Clinica.qmd"))

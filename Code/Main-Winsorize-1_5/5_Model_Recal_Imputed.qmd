@@ -1,0 +1,232 @@
+---
+title: "External validation, recalibration, and clinical utility of the prognostic model kidney failure risk equation in patients with CKD stages G3-4: a nationwide retrospective cohort analysis in Peru" 
+subtitle: "Main Analysis - Winsorization 1.5%: 5. Recalibration"
+author: "Percy Soto Becerra"
+format: 
+  html: 
+   theme: cerulean
+   toc: true
+   number-sections: true
+   df-print: paged
+   page-layout: full
+   embed-resources: true
+   cache: false
+execute: 
+  warning: false
+---
+
+## Setup
+
+```{r}
+#| label: load-packages
+#| include: true
+
+rm(list = ls())
+
+# Load libraries and data ---
+
+# Libraries ----
+# Install packages
+pacman::p_load(
+  rio, 
+  here, 
+  tidyverse, 
+  gtools, 
+  kableExtra, 
+  patchwork, 
+  flextable, 
+  furrr, 
+  parallel, 
+  mice, 
+  survival,
+  prodlim, 
+  cmprsk,
+  riskRegression,
+  pec, 
+  splines
+)
+
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+source(here("Code", "source", "recal.risk.basal.R"))
+source(here("Code", "source", "kfre_pr.risk.basal.R"))
+source(here("Code", "source", "recal.risk.coef.R"))
+source(here("Code", "source", "kfre_pi.coef.R"))
+source(here("Code", "source", "recal.risk.basal.csh.R"))
+source(here("Code", "source", "kfre_pr.risk.basal.csh.R"))
+source(here("Code", "source", "recal.risk.coef.csh.R"))
+source(here("Code", "source", "kfre_pr.risk.coef.csh.R"))
+source(here("Code", "source", "kfre_pi.coef.csh.R"))
+```
+
+## Load data
+
+```{r}
+# # Import data
+dataA <- readRDS(here::here("Data", "Tidy", 
+                                "Main-Winsorize-1_5", "data_impA.rds")) 
+
+dataA <- dataA |> 
+  mutate(beta.sum = kfre_pi(dataA), 
+         eventb5y = case_when(
+           eventd5y %in% c(0, 2) ~ 0, 
+           eventd5y %in% c(1)  ~ 1, 
+           TRUE ~ as.numeric(NA)
+         ))  |> 
+  filter(.imp != 0) 
+```
+
+## Method A: Reestimate Baseline Risk Using Cox
+
+In this recalibration approach, we will only reestimate the baseline risk:
+
+```{r}
+p5y <- recal.risk.basal(dataA, 5)
+p5y
+```
+
+```{r}
+p2y <- recal.risk.basal(dataA, 2)
+p2y
+```
+
+The new recalibrated factor to calculate the baseline risk at 5 years is `r p5y$st0_imp`. At 2 years, it is `r p2y$st0_imp`.
+
+With this, we will reestimate the predicted probabilities using the recalibrated model, only updating the baseline risk:
+
+```{r}
+df_recal_modA <- p2y[[1]] |> 
+  bind_rows(p5y[[1]])
+
+export(df_recal_modA, here("Data", "Tidy", "Main-Winsorize-1_5", "equations", 
+                            "df_recal_modA.rds"))
+head(df_recal_modA)
+```
+
+## Method B: Reestimate Coefficients Using Cox
+
+First, we refit a Cox regression model on the prognostic index and recalculate the coefficient:
+
+```{r}
+p5y_2 <- recal.risk.coef(dataA, 5)
+p5y_2
+```
+
+Under this approach, the coefficient adjustment factor at 5 years is `r p5y_2$fc_coef_imp`, and the recalibrated baseline survival is `r p5y_2$st0_imp`.
+
+```{r}
+p2y_2 <- recal.risk.coef(dataA, 2)
+p2y_2
+```
+
+The coefficient adjustment factor at 2 years is `r p2y_2$fc_coef_imp`, and the recalibrated baseline survival is `r p2y_2$st0_imp`.
+
+With this, we will reestimate the predicted probabilities using the recalibrated model, updating both the baseline risk and the coefficients:
+
+```{r}
+df_recal_modB <- p2y_2[[1]] |> 
+  bind_rows(p5y_2[[1]])
+
+export(df_recal_modB, here("Data", "Tidy", "Main-Winsorize-1_5", "equations", 
+                           "df_recal_modB.rds"))
+head(df_recal_modB)
+```
+
+## Method C: Reestimate Baseline Risk Using Cause-specific Hazard Models
+
+In this recalibration approach, we will only reestimate the baseline risk:
+
+```{r}
+p5y_csh <- recal.risk.basal.csh(dataA, 5)
+p5y_csh
+```
+
+```{r}
+p2y_csh <- recal.risk.basal.csh(dataA, 2)
+p2y_csh
+```
+
+The recalibrated factor to calculate the baseline risk at 5 years is `r p5y_csh$st0_im`p`. At 2 years, it is `r p2y_csh$st0_imp`.
+
+With this, we will reestimate the predicted probabilities using the recalibrated model, only updating the baseline risk:
+
+```{r}
+df_recal_modC <- p2y_csh[[1]] |> 
+  bind_rows(p5y_csh[[1]])
+
+export(df_recal_modC, here("Data", "Tidy", "Main-Winsorize-1_5", "equations", 
+                           "df_recal_modC.rds"))
+head(df_recal_modC)
+```
+
+## Method D: Reestimate Coefficients Using Cause-specific Hazard Models
+
+First, we refit a Cause-specific Hazard Model on the prognostic index and recalculate the coefficient:
+
+```{r}
+p5y_2.csh <- recal.risk.coef.csh(dataA, 5)
+p5y_2.csh
+```
+
+Under this approach, the coefficient adjustment factor at 5 years is `r p5y_2.csh$fc_coef_imp`, and the recalibrated baseline survival is r `p5y_2.csh$st0_imp`.
+
+```{r}
+p2y_2.csh <- recal.risk.coef.csh(dataA, 2)
+p2y_2.csh
+```
+
+The coefficient adjustment factor at 2 years is `r p2y_2.csh$fc_coef_imp`, and the recalibrated baseline survival is `r p2y_2.csh$st0_imp`.
+
+With this, we will reestimate the predicted probabilities using the recalibrated model, updating both the baseline risk and the coefficients:
+
+```{r}
+df_recal_modD <- p2y_2.csh[[1]] |> 
+  bind_rows(p5y_2.csh[[1]])
+
+export(df_recal_modD, here("Data", "Tidy", "Main-Winsorize-1_5", "equations", 
+                           "df_recal_modD.rds"))
+head(df_recal_modD)
+```
+
+## Recalibration Table
+
+```{r}
+datos.recal <- data.frame(
+  
+  metodo = rep(c("A", "B", "C", "D"), each = 2),
+  
+  year = rep(c(2, 5), 2), 
+  
+  sobrev_recal = c(p2y$st0_pool, 
+                   p5y$st0_pool, 
+                   p2y_2$st0_pool, 
+                   p5y_2$st0_pool,
+                   p2y_csh$st0_pool, 
+                   p5y_csh$st0_pool, 
+                   p2y_2.csh$st0_pool, 
+                   p5y_2.csh$st0_pool), 
+  
+  fc_coef = c(p2y$fc_coef_pool, 
+              p5y$fc_coef_pool, 
+              p2y_2$fc_coef_pool, 
+              p5y_2$fc_coef_pool, 
+              p2y_csh$fc_coef_pool, 
+              p5y_csh$fc_coef_pool, 
+              p2y_2.csh$fc_coef_pool, 
+              p5y_2.csh$fc_coef_pool)
+)
+
+export(datos.recal, here("Data", "Tidy", "Main-Winsorize-1_5", "equations", 
+                         "recal_loads.rds" ))
+
+datos.recal |> 
+  kbl() |> 
+  kable_classic()
+```
+
+## Reproducibility Ticket
+
+```{r}
+sessionInfo()
+```
+

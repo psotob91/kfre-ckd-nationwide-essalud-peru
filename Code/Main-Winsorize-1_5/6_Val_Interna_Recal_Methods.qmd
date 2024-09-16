@@ -1,0 +1,2133 @@
+---
+title: "External validation, recalibration, and clinical utility of the prognostic model kidney failure risk equation in patients with CKD stages G3-4: a nationwide retrospective cohort analysis in Peru" 
+subtitle: "Main Analysis - Winsorization 1.5%: 6. Internal Validation of Recalibrated Equations"
+author: "Percy Soto Becerra"
+format: 
+  html: 
+   theme: cerulean
+   toc: true
+   number-sections: true
+   df-print: paged
+   page-layout: full
+   embed-resources: true
+   cache: false
+execute: 
+  warning: false
+---
+
+## Setup
+
+```{r}
+#| label: load-packages
+#| include: true
+
+rm(list = ls())
+
+# Use pacman to check whether packages are installed, if not load
+if (!require("pacman")) install.packages("pacman")
+library(pacman)
+
+# Install packages
+pacman::p_load(
+  rio, 
+  here, 
+  tidyverse, 
+  gtools, 
+  kableExtra, 
+  patchwork, 
+  flextable, 
+  furrr, 
+  parallel, 
+  mice, 
+  survival,
+  prodlim, 
+  cmprsk,
+  riskRegression,
+  pec, 
+  splines
+)
+
+source(here("Code", "source", "print_equation.R")) 
+```
+
+```{r}
+eq_kfre_original2y <- data.frame(
+  vars = c("age", "male", "eGFR", "logACR"),
+  coefs = c(-0.2201, 0.2467, -0.5567, 0.4510),
+  scale = c(10, 1, 5, 1),
+  center = c(7.036, 0.5642, 7.222, 5.137)
+)
+
+st02y <- 0.9832
+
+
+eq_kfre_original5y <- data.frame(
+  vars = c("age", "male", "eGFR", "logACR"),
+  coefs = c(-0.2201, 0.2467, -0.5567, 0.4510),
+  scale = c(10, 1, 5, 1),
+  center = c(7.036, 0.5642, 7.222, 5.137)
+)
+st05y <- 0.9365
+```
+
+- For 2 years:
+
+```{r}
+#| results: asis
+print_equation(eq_kfre_original2y, st02y)
+```
+
+- For 5 years:
+
+```{r}
+#| results: asis
+print_equation(eq_kfre_original2y, st02y)
+```
+
+- The recalibrated survival rates and coefficient recalibration factors, depending on the method used, are displayed below:
+
+```{r}
+recal_loads <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "equations", "recal_loads.rds")) 
+recal_loads |> 
+  kbl() |> 
+  kable_classic()
+```
+
+## Configurate cores
+
+```{r}
+n_cores <- parallel::detectCores()
+n_cores <- (n_cores - 2) / 2
+# Evaluate futures in parallel - max of two workers to avoid hogging resources
+future::plan("multisession", workers = n_cores)
+```
+
+## Set some constants
+
+```{r}
+seed <- 2014
+primary_event <- 1
+imputs <- 101
+```
+
+## Load data
+
+```{r}
+imp.datosA <- readRDS(here::here("Data", "Tidy", "Main-Winsorize-1_5", "data_impA.rds")) |>  
+  filter(.imp != 0) |> 
+  filter(.imp < imputs)
+
+imp.datosA2 <- imp.datosA 
+```
+
+## Method A: Reestimate Baseline Risk Using Cox
+
+```{r}
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+source(here("Code", "source", "oe_ratio.R"))
+source(here("Code", "source", "calibration_intercept.R"))
+source(here("Code", "source", "calibration_slope.R"))
+source(here("Code", "source", "auc.R"))
+source(here("Code", "source", "auc_brier_boot.R"))
+source(here("Code", "source", "validate.mids.R"))
+source(here("Code", "source", "pool.validate.mids.R"))
+source(here("Code", "source", "pool.auc.mids.R"))
+source(here("Code", "source", "process_imp_cal_plot.R"))
+source(here("Code", "source", "predict.mira.R"))
+source(here("Code", "source", "performance_measures.R"))
+source(here("Code", "source", "tidy_performance_stack.R"))    
+source(here("Code", "source", "tidy_pool.R")) 
+source(here("Code", "source", "process_imp_cal_plot2.R")) 
+source(here("Code", "source", "print_equation.R")) 
+```
+
+```{r}
+df_recal_metA <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "equations", "df_recal_modA.rds"))
+
+df_recal_metA2y <- df_recal_metA |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metA5y <- df_recal_metA |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+rm(df_recal_metA)
+
+imp.datosA <- imp.datosA2 |> 
+  left_join(df_recal_metA2y, by = ".imp") |> 
+  left_join(df_recal_metA5y, by = ".imp") |> 
+  mutate(eventdf = factor(eventd), 
+        risk2y = 1 - st0_imp2y ^ exp(fc_coef_imp2y * kfre_pi(imp.datosA2)), 
+        risk5y = 1 - st0_imp5y ^ exp(fc_coef_imp5y * kfre_pi(imp.datosA2))) |> 
+  select(.imp, .id, time, eventd, eventdf, risk2y, risk5y)
+
+rm(df_recal_metA2y, df_recal_metA5y)
+```
+
+```{r}
+head(imp.datosA)
+```
+
+### Calibration and Discrimination Measures
+
+```{r}
+future::plan("multisession", workers = n_cores)
+results_stack3a4_2y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 2, 
+                                  primary_event = 1, 
+                                  pred = "risk2y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+gc()
+
+rio::export(results_stack3a4_2y , here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                       "res_valext_kfre_stack3a4_2y_metA.rds"))
+
+future::plan("multisession", workers = n_cores)
+results_stack3a4_5y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 5, 
+                                  primary_event = 1, 
+                                  pred = "risk5y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+rio::export(results_stack3a4_5y, here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                      "res_valext_kfre_stack3a4_5y_metA.rds"))
+
+gc()
+```
+
+```{r}
+res_pool1 <- tidy_pool(results_stack3a4_2y) 
+
+res_pool1 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+res_pool2 <- tidy_pool(results_stack3a4_5y) 
+
+res_pool2 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+tab_res_2y <- res_pool1 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "2 years")
+
+tab_res_5y <- res_pool2 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "5 years")
+
+tab_res0 <- tab_res_2y |>
+  bind_rows(tab_res_5y)
+
+tab_res0 |> 
+  as_grouped_data(groups = "year") |> 
+  as_grouped_data(groups = "grupo") |> 
+  flextable::as_flextable(hide_grouplabel = TRUE) |> 
+  autofit() |> 
+  set_header_labels(
+    year = "Time horizon", 
+    term = "Performance measure", 
+    measures = "Method A"
+  ) |>  
+  bold(j = 1) |> 
+  set_caption("Table. Performance measures of KFRE in the external dataset of patients with CKD Stages 3a-4") |>  
+  theme_booktabs() |>   
+  bold(bold = TRUE, part = "header") -> table_perf_final
+
+table_perf_final %>% 
+  flextable::save_as_docx(path = here("Tables", "Main-Winsorize-1_5", "Table_Imputed_Performance_metA.docx"))
+
+table_perf_final
+```
+
+```{r}
+rm(list=ls()[! ls() %in% c("imp.datosA", "imp.datosA2", "vdata", 
+                           "primary_event", "horizon", 
+                           "process_imp_cal_plot", "seed", "n_cores", "kfre_pi", 
+                           "imputs", "cal_metA", "cal_metB", "cal_metC", "cal_metD")])
+gc()
+```
+
+### Moderate calibration: Calibration curves lowess based on subdistributional hazards
+
+```{r}
+primary_event <- 1
+
+n_internal_knots <- 5
+
+# Seleccion del grupo: Stages 3-4----
+
+# A 2 años----
+horizon <- 2
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk2y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred)))
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_2y_metA.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_2y_metA.rds"))
+
+cal_metA2y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metA2y_pool <- cal_metA2y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "2 years") |> 
+  select(year, everything())
+
+rio::export(cal_metA2y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metA2y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_2y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_2y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.1, color = "#38B8F7") -> plot_mod0_imp_2y
+
+gc()
+
+# A 5 años----
+horizon <- 5
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk5y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred))) 
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_5y_metA.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_5y_metA.rds"))
+
+cal_metA5y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metA5y_pool <- cal_metA5y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "5 years") |> 
+  select(year, everything())
+
+rio::export(cal_metA5y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metA5y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue", 
+             alpha = 0.5) + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_5y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_5y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.3, color = "#38B8F7") -> plot_mod0_imp_5y
+
+## Grafico final
+plot_mod0_2y <- plot_mod0_2y + 
+  labs(title = "Method A\n(2 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_5y <- plot_mod0_5y + 
+  labs(title = "Method A\n(5 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_2y <- plot_mod0_imp_2y +
+  labs(title = "Method A\n(2 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_5y <- plot_mod0_imp_5y +
+  labs(title = "Method A\n(5 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_cal_mod0 <- plot_mod0_2y / plot_mod0_5y
+plot_cal_imp_mod0 <- plot_mod0_imp_2y / plot_mod0_imp_5y
+
+
+export(plot_mod0_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metA_2y.rds"))
+export(plot_mod0_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metA_5y.rds"))
+export(plot_cal_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metA.rds"))
+
+export(plot_mod0_imp_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metA_imp_2y.rds"))
+export(plot_mod0_imp_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metA_imp_5y.rds"))
+export(plot_cal_imp_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_imp_metA.rds"))
+
+
+ggsave(filename = "Plot_Calibration_imputed_metA.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+ggsave(filename = "Plot_Calibration_imputed_estabilidad_metA.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_imp_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+gc()
+
+cal_metA2y_pool |> 
+  bind_rows(cal_metA5y_pool) |> 
+  pivot_longer(cols = ICI:root_square_bias, 
+               names_to = "metrica", 
+               values_to = "modelo") |> 
+  mutate(modelo = round(modelo, 3)) -> cal_metA
+```
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_metA.jpeg"))
+```
+
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_estabilidad_metA.jpeg"))
+```
+
+## Method B: Reestimate Coefficients Using Cox
+
+```{r}
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+source(here("Code", "source", "oe_ratio.R"))
+source(here("Code", "source", "calibration_intercept.R"))
+source(here("Code", "source", "calibration_slope.R"))
+source(here("Code", "source", "auc.R"))
+source(here("Code", "source", "auc_brier_boot.R"))
+source(here("Code", "source", "validate.mids.R"))
+source(here("Code", "source", "pool.validate.mids.R"))
+source(here("Code", "source", "pool.auc.mids.R"))
+source(here("Code", "source", "process_imp_cal_plot.R"))
+source(here("Code", "source", "predict.mira.R"))
+source(here("Code", "source", "performance_measures.R"))
+source(here("Code", "source", "tidy_performance_stack.R"))    
+source(here("Code", "source", "tidy_pool.R")) 
+source(here("Code", "source", "process_imp_cal_plot2.R")) 
+source(here("Code", "source", "print_equation.R")) 
+```
+
+```{r}
+df_recal_metB <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "equations", "df_recal_modB.rds"))
+
+df_recal_metB2y <- df_recal_metB |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metB5y <- df_recal_metB |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+rm(df_recal_metB)
+
+gc()
+
+imp.datosA <- imp.datosA2 |> 
+  left_join(df_recal_metB2y, by = ".imp") |> 
+  left_join(df_recal_metB5y, by = ".imp") |> 
+  mutate(eventdf = factor(eventd), 
+        risk2y = 1 - st0_imp2y ^ exp(fc_coef_imp2y * kfre_pi(imp.datosA2)), 
+        risk5y = 1 - st0_imp5y ^ exp(fc_coef_imp5y * kfre_pi(imp.datosA2))) |> 
+  select(.imp, .id, time, eventd, eventdf, risk2y, risk5y)
+
+rm(df_recal_metB2y, df_recal_metB5y)
+```
+
+```{r}
+head(imp.datosA)
+```
+
+### Calibration and Discrimination Measures
+
+```{r}
+future::plan("multisession", workers = n_cores)
+results_stack3a4_2y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 2, 
+                                  primary_event = 1, 
+                                  pred = "risk2y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+gc()
+
+rio::export(results_stack3a4_2y , here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                       "res_valext_kfre_stack3a4_2y_metB.rds"))
+
+future::plan("multisession", workers = n_cores)
+results_stack3a4_5y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 5, 
+                                  primary_event = 1, 
+                                  pred = "risk5y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+rio::export(results_stack3a4_5y, here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                      "res_valext_kfre_stack3a4_5y_metB.rds"))
+
+gc()
+```
+
+```{r}
+res_pool1 <- tidy_pool(results_stack3a4_2y) 
+
+res_pool1 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+res_pool2 <- tidy_pool(results_stack3a4_5y) 
+
+res_pool2 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+tab_res_2y <- res_pool1 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "2 years")
+
+tab_res_5y <- res_pool2 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "5 years")
+
+tab_res0 <- tab_res_2y |>
+  bind_rows(tab_res_5y)
+
+tab_res0 |> 
+  as_grouped_data(groups = "year") |> 
+  as_grouped_data(groups = "grupo") |> 
+  flextable::as_flextable(hide_grouplabel = TRUE) |> 
+  autofit() |> 
+  set_header_labels(
+    year = "Time horizon", 
+    term = "Performance measure", 
+    measures = "Method B"
+  ) |>  
+  bold(j = 1) |> 
+  set_caption("Table. Performance measures of KFRE in the external dataset of patients with CKD Stages 3a-4") |>  
+  theme_booktabs() |>   
+  bold(bold = TRUE, part = "header") -> table_perf_final
+
+table_perf_final %>% 
+  flextable::save_as_docx(path = here("Tables", "Main-Winsorize-1_5", "Table_Imputed_Performance_metB.docx"))
+
+table_perf_final
+```
+
+```{r}
+rm(list=ls()[! ls() %in% c("imp.datosA","imp.datosA2", "vdata", 
+                           "primary_event", "horizon", 
+                           "process_imp_cal_plot", "seed", "n_cores", "kfre_pi", 
+                           "imputs", "cal_metA", "cal_metB", "cal_metC", "cal_metD")])
+gc()
+```
+
+### Moderate calibration: Calibration curves lowess based on subdistributional hazards
+
+```{r}
+primary_event <- 1
+
+n_internal_knots <- 5
+
+# Seleccion del grupo: Stages 3-4----
+
+# A 2 años----
+horizon <- 2
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk2y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred)))
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_2y_metB.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_2y_metB.rds"))
+
+cal_metB2y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metB2y_pool <- cal_metB2y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "2 years") |> 
+  select(year, everything())
+
+rio::export(cal_metB2y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metB2y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_2y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_2y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.1, color = "#38B8F7") -> plot_mod0_imp_2y
+
+gc()
+
+# A 5 años----
+horizon <- 5
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk5y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred))) 
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_5y_metB.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_5y_metB.rds"))
+
+cal_metB5y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metB5y_pool <- cal_metB5y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "5 years") |> 
+  select(year, everything())
+
+rio::export(cal_metB5y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metB5y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue", 
+             alpha = 0.5) + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_5y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_5y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.3, color = "#38B8F7") -> plot_mod0_imp_5y
+
+## Grafico final
+plot_mod0_2y <- plot_mod0_2y + 
+  labs(title = "Method B\n(2 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_5y <- plot_mod0_5y + 
+  labs(title = "Method B\n(5 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_2y <- plot_mod0_imp_2y +
+  labs(title = "Method B\n(2 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_5y <- plot_mod0_imp_5y +
+  labs(title = "Method B\n(5 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_cal_mod0 <- plot_mod0_2y / plot_mod0_5y
+plot_cal_imp_mod0 <- plot_mod0_imp_2y / plot_mod0_imp_5y
+
+
+export(plot_mod0_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metB_2y.rds"))
+export(plot_mod0_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metB_5y.rds"))
+export(plot_cal_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metB.rds"))
+
+export(plot_mod0_imp_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metB_imp_2y.rds"))
+export(plot_mod0_imp_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metB_imp_5y.rds"))
+export(plot_cal_imp_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_imp_metB.rds"))
+
+
+ggsave(filename = "Plot_Calibration_imputed_metB.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+ggsave(filename = "Plot_Calibration_imputed_estabilidad_metB.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_imp_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+gc()
+
+cal_metB2y_pool |> 
+  bind_rows(cal_metB5y_pool) |> 
+  pivot_longer(cols = ICI:root_square_bias, 
+               names_to = "metrica", 
+               values_to = "modelo") |> 
+  mutate(modelo = round(modelo, 3)) -> cal_metB
+```
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_metB.jpeg"))
+```
+
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_estabilidad_metB.jpeg"))
+```
+
+
+## Method C: Reestimate Baseline Risk Using Cause-specific Hazard Models
+
+```{r}
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+source(here("Code", "source", "oe_ratio.R"))
+source(here("Code", "source", "calibration_intercept.R"))
+source(here("Code", "source", "calibration_slope.R"))
+source(here("Code", "source", "auc.R"))
+source(here("Code", "source", "auc_brier_boot.R"))
+source(here("Code", "source", "validate.mids.R"))
+source(here("Code", "source", "pool.validate.mids.R"))
+source(here("Code", "source", "pool.auc.mids.R"))
+source(here("Code", "source", "process_imp_cal_plot.R"))
+source(here("Code", "source", "predict.mira.R"))
+source(here("Code", "source", "performance_measures.R"))
+source(here("Code", "source", "tidy_performance_stack.R"))    
+source(here("Code", "source", "tidy_pool.R")) 
+source(here("Code", "source", "process_imp_cal_plot2.R")) 
+source(here("Code", "source", "print_equation.R")) 
+```
+
+```{r}
+df_recal_metC <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "equations", "df_recal_modC.rds"))
+
+df_recal_metC2y <- df_recal_metC |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metC5y <- df_recal_metC |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+rm(df_recal_metC)
+
+gc()
+
+imp.datosA <- imp.datosA2 |> 
+  left_join(df_recal_metC2y, by = ".imp") |> 
+  left_join(df_recal_metC5y, by = ".imp") |> 
+  mutate(eventdf = factor(eventd), 
+        risk2y = 1 - st0_imp2y ^ exp(fc_coef_imp2y * kfre_pi(imp.datosA2)), 
+        risk5y = 1 - st0_imp5y ^ exp(fc_coef_imp5y * kfre_pi(imp.datosA2))) |> 
+  select(.imp, .id, time, eventd, eventdf, risk2y, risk5y)
+
+rm(df_recal_metC2y, df_recal_metC5y)
+```
+
+```{r}
+head(imp.datosA)
+```
+
+### Calibration and Discrimination Measures
+
+```{r}
+future::plan("multisession", workers = n_cores)
+results_stack3a4_2y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 2, 
+                                  primary_event = 1, 
+                                  pred = "risk2y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+gc()
+
+rio::export(results_stack3a4_2y , here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                       "res_valext_kfre_stack3a4_2y_metC.rds"))
+
+future::plan("multisession", workers = n_cores)
+results_stack3a4_5y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 5, 
+                                  primary_event = 1, 
+                                  pred = "risk5y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+rio::export(results_stack3a4_5y, here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                      "res_valext_kfre_stack3a4_5y_metC.rds"))
+
+gc()
+```
+
+```{r}
+res_pool1 <- tidy_pool(results_stack3a4_2y) 
+
+res_pool1 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+res_pool2 <- tidy_pool(results_stack3a4_5y) 
+
+res_pool2 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+tab_res_2y <- res_pool1 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "2 years")
+
+tab_res_5y <- res_pool2 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "5 years")
+
+tab_res0 <- tab_res_2y |>
+  bind_rows(tab_res_5y)
+
+tab_res0 |> 
+  as_grouped_data(groups = "year") |> 
+  as_grouped_data(groups = "grupo") |> 
+  flextable::as_flextable(hide_grouplabel = TRUE) |> 
+  autofit() |> 
+  set_header_labels(
+    year = "Time horizon", 
+    term = "Performance measure", 
+    measures = "Method C"
+  ) |>  
+  bold(j = 1) |> 
+  set_caption("Table. Performance measures of KFRE in the external dataset of patients with CKD Stages 3a-4") |>  
+  theme_booktabs() |>   
+  bold(bold = TRUE, part = "header") -> table_perf_final
+
+table_perf_final %>% 
+  flextable::save_as_docx(path = here("Tables", "Main-Winsorize-1_5", "Table_Imputed_Performance_metC.docx"))
+
+table_perf_final
+```
+
+```{r}
+rm(list=ls()[! ls() %in% c("imp.datosA", "imp.datosA2", "vdata", 
+                           "primary_event", "horizon", 
+                           "process_imp_cal_plot", "seed", "n_cores", "kfre_pi", 
+                           "imputs", "cal_metA", "cal_metB", "cal_metC", "cal_metD")])
+gc()
+```
+
+### Moderate calibration: Calibration curves lowess based on subdistributional hazards
+
+```{r}
+primary_event <- 1
+
+n_internal_knots <- 5
+
+# Seleccion del grupo: Stages 3-4----
+
+# A 2 años----
+horizon <- 2
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk2y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred)))
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_2y_metC.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_2y_metC.rds"))
+
+cal_metC2y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metC2y_pool <- cal_metC2y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "2 years") |> 
+  select(year, everything())
+
+rio::export(cal_metC2y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metC2y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_2y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_2y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.1, color = "#38B8F7") -> plot_mod0_imp_2y
+
+gc()
+
+# A 5 años----
+horizon <- 5
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk5y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred))) 
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_5y_metC.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_5y_metC.rds"))
+
+cal_metC5y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metC5y_pool <- cal_metC5y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "5 years") |> 
+  select(year, everything())
+
+rio::export(cal_metC5y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metC5y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue", 
+             alpha = 0.5) + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_5y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_5y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.3, color = "#38B8F7") -> plot_mod0_imp_5y
+
+## Grafico final
+plot_mod0_2y <- plot_mod0_2y + 
+  labs(title = "Method C\n(2 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_5y <- plot_mod0_5y + 
+  labs(title = "Method C\n(5 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_2y <- plot_mod0_imp_2y +
+  labs(title = "Method C\n(2 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_5y <- plot_mod0_imp_5y +
+  labs(title = "Method C\n(5 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_cal_mod0 <- plot_mod0_2y / plot_mod0_5y
+plot_cal_imp_mod0 <- plot_mod0_imp_2y / plot_mod0_imp_5y
+
+
+export(plot_mod0_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metC_2y.rds"))
+export(plot_mod0_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metC_5y.rds"))
+export(plot_cal_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metC.rds"))
+
+export(plot_mod0_imp_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metC_imp_2y.rds"))
+export(plot_mod0_imp_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metC_imp_5y.rds"))
+export(plot_cal_imp_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_imp_metC.rds"))
+
+
+ggsave(filename = "Plot_Calibration_imputed_metC.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+ggsave(filename = "Plot_Calibration_imputed_estabilidad_metC.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_imp_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+gc()
+
+cal_metC2y_pool |> 
+  bind_rows(cal_metC5y_pool) |> 
+  pivot_longer(cols = ICI:root_square_bias, 
+               names_to = "metrica", 
+               values_to = "modelo") |> 
+  mutate(modelo = round(modelo, 3)) -> cal_metC
+```
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_metC.jpeg"))
+```
+
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_estabilidad_metC.jpeg"))
+```
+
+## Method D: Reestimate Coefficients Using Cause-specific Hazard Models
+
+```{r}
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+source(here("Code", "source", "oe_ratio.R"))
+source(here("Code", "source", "calibration_intercept.R"))
+source(here("Code", "source", "calibration_slope.R"))
+source(here("Code", "source", "auc.R"))
+source(here("Code", "source", "auc_brier_boot.R"))
+source(here("Code", "source", "validate.mids.R"))
+source(here("Code", "source", "pool.validate.mids.R"))
+source(here("Code", "source", "pool.auc.mids.R"))
+source(here("Code", "source", "process_imp_cal_plot.R"))
+source(here("Code", "source", "predict.mira.R"))
+source(here("Code", "source", "performance_measures.R"))
+source(here("Code", "source", "tidy_performance_stack.R"))    
+source(here("Code", "source", "tidy_pool.R")) 
+source(here("Code", "source", "process_imp_cal_plot2.R")) 
+source(here("Code", "source", "print_equation.R")) 
+```
+
+```{r}
+df_recal_metD <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "equations", "df_recal_modD.rds"))
+
+df_recal_metD2y <- df_recal_metD |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metD5y <- df_recal_metD |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+rm(df_recal_metD)
+
+gc()
+
+imp.datosA <- imp.datosA2 |> 
+  left_join(df_recal_metD2y, by = ".imp") |> 
+  left_join(df_recal_metD5y, by = ".imp") |> 
+  mutate(eventdf = factor(eventd), 
+        risk2y = 1 - st0_imp2y ^ exp(fc_coef_imp2y * kfre_pi(imp.datosA2)), 
+        risk5y = 1 - st0_imp5y ^ exp(fc_coef_imp5y * kfre_pi(imp.datosA2))) |> 
+  select(.imp, .id, time, eventd, eventdf, risk2y, risk5y)
+
+rm(df_recal_metD2y, df_recal_metD5y)
+```
+
+```{r}
+head(imp.datosA)
+```
+
+### Calibration and Discrimination Measures
+
+```{r}
+future::plan("multisession", workers = n_cores)
+results_stack3a4_2y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 2, 
+                                  primary_event = 1, 
+                                  pred = "risk2y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+gc()
+
+rio::export(results_stack3a4_2y , here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                       "res_valext_kfre_stack3a4_2y_metD.rds"))
+
+future::plan("multisession", workers = n_cores)
+results_stack3a4_5y <- tidy_performance_stack(imp.datosA, 
+                                  horizon = 5, 
+                                  primary_event = 1, 
+                                  pred = "risk5y",
+                                  seed = seed, 
+                                  n_cores = n_cores)
+
+rio::export(results_stack3a4_5y, here("Data", "Tidy", "Main-Winsorize-1_5", 
+                                      "res_valext_kfre_stack3a4_5y_metD.rds"))
+
+gc()
+```
+
+```{r}
+res_pool1 <- tidy_pool(results_stack3a4_2y) 
+
+res_pool1 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+res_pool2 <- tidy_pool(results_stack3a4_5y) 
+
+res_pool2 |> 
+  kbl() |> 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r}
+tab_res_2y <- res_pool1 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "2 years")
+
+tab_res_5y <- res_pool2 |> 
+  select(term, estimate, ll, ul) |> 
+  mutate(
+    across(c(estimate, ll, ul), ~ if_else(term == "Log OE ratio", exp(.x), .x)), 
+    across(c(estimate, ll, ul), ~ if_else(term == "Logit AUC", exp(.x) / (1  + exp(.x)), .x)), 
+    term = if_else(term == "Log OE ratio", "OE ratio", term), 
+    term = if_else(term == "Logit AUC", "AUC", term), 
+    across(c(estimate, ll, ul), ~ if_else(term %in% 
+                                            c("Average predicted risk", 
+                                              "Overall observerd risk", 
+                                              "OE difference"), 100 * .x, .x)), 
+    across(c(estimate, ll, ul), ~ round(.x, 2)), 
+    measures = case_when(term == "Average predicted risk" ~ str_glue("{estimate}%"), 
+                       term %in% c("Overall observerd risk", "OE difference") ~ str_glue("{estimate}% ({ll}% to {ul}%)"),
+                       TRUE ~ str_glue("{estimate} ({ll} to {ul})")
+                       )
+    ) |> 
+  select(term, measures) |> 
+  mutate(grupo = c(rep("Calibration", 6), "Discrimination", "Overall performance"), 
+         year = "5 years")
+
+tab_res0 <- tab_res_2y |>
+  bind_rows(tab_res_5y)
+
+tab_res0 |> 
+  as_grouped_data(groups = "year") |> 
+  as_grouped_data(groups = "grupo") |> 
+  flextable::as_flextable(hide_grouplabel = TRUE) |> 
+  autofit() |> 
+  set_header_labels(
+    year = "Time horizon", 
+    term = "Performance measure", 
+    measures = "Method D"
+  ) |>  
+  bold(j = 1) |> 
+  set_caption("Table. Performance measures of KFRE in the external dataset of patients with CKD Stages 3a-4") |>  
+  theme_booktabs() |>   
+  bold(bold = TRUE, part = "header") -> table_perf_final
+
+table_perf_final %>% 
+  flextable::save_as_docx(path = here("Tables", "Main-Winsorize-1_5", "Table_Imputed_Performance_metD.docx"))
+
+table_perf_final
+```
+
+```{r}
+rm(list=ls()[! ls() %in% c("imp.datosA", "imp.datosA2", "vdata", 
+                           "primary_event", "horizon", 
+                           "process_imp_cal_plot", "seed", "n_cores", "kfre_pi", 
+                           "imputs", "cal_metA", "cal_metB", "cal_metC", "cal_metD")])
+gc()
+```
+
+### Moderate calibration: Calibration curves lowess based on subdistributional hazards
+
+
+```{r}
+primary_event <- 1
+
+n_internal_knots <- 5
+
+# Seleccion del grupo: Stages 3-4----
+
+# A 2 años----
+horizon <- 2
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk2y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred)))
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_2y_metD.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_2y_metD.rds"))
+
+cal_metD2y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metD2y_pool <- cal_metD2y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "2 years") |> 
+  select(year, everything())
+
+rio::export(cal_metD2y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metD2y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_2y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_2y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.1, color = "#38B8F7") -> plot_mod0_imp_2y
+
+gc()
+
+# A 5 años----
+horizon <- 5
+
+vdata <- imp.datosA %>% 
+  rename(pred = risk5y) |> 
+  select(.imp, .id, time, eventd, pred) |> 
+  mutate(cll_pred = log(-log(1 - pred))) 
+
+rcs_vdata <- ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+knots <- attr(rcs_vdata, "knots")
+bound.knots <-  attr(rcs_vdata, "Boundary.knots")
+
+pp <- seq(min(vdata$pred), max(vdata$pred), length.out = 1000)
+cll_pp <- log(-log(1 - pp))
+rcs_cll_pp <- ns(cll_pp, knots = knots, Boundary.knots = bound.knots)
+colnames(rcs_cll_pp) <- paste0("basisf_", colnames(rcs_cll_pp))
+
+vdata_bis_pp <- cbind(pp, as.data.frame(rcs_cll_pp))
+
+future::plan("multisession", workers = n_cores)
+subdist_df_imp <- future_map(1:max(vdata$.imp),
+                         process_imp_cal_plot, 
+                         vdata = vdata, 
+                         primary_event = primary_event, 
+                         horizon = horizon, 
+                         type = "subdist_hazard", 
+                         n_internal_knots = n_internal_knots, 
+                         vdata_bis_pp, 
+                         .options = furrr_options(seed = seed, 
+                                                  packages = c("riskRegression", 
+                                                               "survival", 
+                                                               "splines", 
+                                                               "cmprsk",
+                                                               "tidyverse")), 
+                         .progress = TRUE)
+
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+subdist_df_imp_obs <- subdist_df_imp |> 
+  bind_rows() |> 
+  filter(type == "observed")
+
+subdist_df_stack <- subdist_df_imp_obs |>
+  group_by(.imp) |> 
+  mutate(deciles_risk = as.integer(quantcut(risk, seq(0, 1, by = 0.1)))) |> 
+  group_by(.imp, deciles_risk) |> 
+  summarise(obs_mean_imp = mean(obs), 
+            risk_mean_imp = mean(risk)) |> 
+  group_by(deciles_risk) |> 
+  summarise(obs_mean_pool = mean(obs_mean_imp), 
+            risk_mean_pool = mean(risk_mean_imp))
+  
+subdist_df_imp_fix <- subdist_df_imp |> 
+  bind_rows() |>  
+  filter(type == "fixed") |> 
+  arrange(risk) |> 
+  summarise(obs_pool = mean(obs), 
+            .by = risk) |> 
+  mutate(deciles_risk = quantcut(risk, seq(0, 1, by = 0.1)))
+
+rio::export(subdist_df_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_imput_3a4_5y_metD.rds"))
+rio::export(subdist_df_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "subdist_df_deciles_3a4_5y_metD.rds"))
+
+cal_metD5y_imp <- subdist_df_imp_obs |> 
+  select(.imp, risk, obs) |> 
+  summarise(ICI = mean(abs(risk - obs)), 
+            E50 = quantile(abs(risk - obs), c(0.5)), 
+            E90 = quantile(abs(risk - obs), c(0.9)), 
+            Emax = max(abs(risk - obs)), 
+            root_square_bias = sqrt(mean((risk - obs) ^ 2)), 
+            .by = ".imp"
+  ) 
+
+cal_metD5y_pool <- cal_metD5y_imp |> 
+  summarise(ICI = mean(ICI), 
+            E50 = mean(E50), 
+            E90 = mean(E90), 
+            Emax = mean(Emax), 
+            root_square_bias = mean(root_square_bias)) |> 
+  mutate(year = "5 years") |> 
+  select(year, everything())
+
+rio::export(cal_metD5y_imp, here("Data", "Tidy", "Main-Winsorize-1_5", "cal_metD5y_imp.rds"))
+
+# Grafico de calibracion
+ggplot() +
+  geom_abline(intercept = 0, slope = 1, colour = "red", linetype = 2) + 
+  geom_line(data = subdist_df_imp_fix, 
+            aes(x = risk, y = obs_pool),
+            alpha = 0.5, color = "black") +
+  geom_point(data = subdist_df_stack,
+             aes(x = risk_mean_pool, y = obs_mean_pool),
+             shape = 23,
+             stroke = 0.1,
+             fill = "blue", 
+             alpha = 0.5) + 
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_bw() + 
+  labs(x = "Predicted risks", y = "Observed outcome proportions") + 
+  # geom_rug(data = subdist_df_stack,
+  #          aes(x = risk_mean_pool, y = obs_mean_pool),
+  #          alpha = 0.1) +
+  coord_fixed(ratio = 1, expand = TRUE)  -> plot_mod0_5y
+
+# Grafico de calibracion con curvas imputadas
+plot_mod0_5y + 
+  geom_line(data = subdist_df_imp_obs, 
+            aes(x = risk, y = obs, group = .imp),
+            alpha = 0.3, color = "#38B8F7") -> plot_mod0_imp_5y
+
+## Grafico final
+plot_mod0_2y <- plot_mod0_2y + 
+  labs(title = "Method D\n(2 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_5y <- plot_mod0_5y + 
+  labs(title = "Method D\n(5 year KFRE)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_2y <- plot_mod0_imp_2y +
+  labs(title = "Method D\n(2 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_mod0_imp_5y <- plot_mod0_imp_5y +
+  labs(title = "Method D\n(5 year KFRE)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot_cal_mod0 <- plot_mod0_2y / plot_mod0_5y
+plot_cal_imp_mod0 <- plot_mod0_imp_2y / plot_mod0_imp_5y
+
+
+export(plot_mod0_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metD_2y.rds"))
+export(plot_mod0_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metD_5y.rds"))
+export(plot_cal_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metD.rds"))
+
+export(plot_mod0_imp_2y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metD_imp_2y.rds"))
+export(plot_mod0_imp_5y, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_metD_imp_5y.rds"))
+export(plot_cal_imp_mod0, here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_imp_metD.rds"))
+
+
+ggsave(filename = "Plot_Calibration_imputed_metD.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+ggsave(filename = "Plot_Calibration_imputed_estabilidad_metD.jpeg", 
+       device = "jpeg", 
+       plot = plot_cal_imp_mod0, 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 12, 
+       height = 12,
+       units = "cm", 
+       dpi = 1000)
+
+gc()
+
+cal_metD2y_pool |> 
+  bind_rows(cal_metD5y_pool) |> 
+  pivot_longer(cols = ICI:root_square_bias, 
+               names_to = "metrica", 
+               values_to = "modelo") |> 
+  mutate(modelo = round(modelo, 3)) -> cal_metD
+```
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_metD.jpeg"))
+```
+
+
+```{r}
+#| fig.align: center
+#| fig-cap: "Calibration curves for each group and prediction horizon"
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Calibration_imputed_estabilidad_metD.jpeg"))
+```
+
+
+## Comparison of Models
+
+### Graphs
+
+```{r}
+plot_cal_metA <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metA.rds"))
+plot_cal_metB <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metB.rds"))
+plot_cal_metC <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metC.rds"))
+plot_cal_metD <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "plot_cal_metD.rds"))
+```
+
+```{r}
+(plot_cal_metA | plot_cal_metB | plot_cal_metC | plot_cal_metD) + plot_annotation(tag_levels = "a") -> plot_comp_calib
+
+ggsave(filename = "Plot_Compare_Methods.jpeg", 
+       plot = plot_comp_calib, 
+       device = "jpeg", 
+       path = here("Figures", "Main-Winsorize-1_5"), 
+       scale = 2, 
+       width = 18, 
+       height = 12, 
+       units = "cm", 
+       dpi = 1000)
+```
+
+
+```{r}
+#| echo: false
+knitr::include_graphics(here("Figures", "Main-Winsorize-1_5", "Plot_Compare_Methods.jpeg"))
+```
+
+### Calibration metrics
+
+```{r}
+cal_mets <- cal_metA |> 
+  rename(modeloA = modelo) |> 
+  left_join(cal_metB |> rename(modeloB = modelo), 
+            by = c("year", "metrica")) |> 
+  left_join(cal_metC |> rename(modeloC = modelo), 
+            by = c("year", "metrica")) |> 
+  left_join(cal_metD |> rename(modeloD = modelo), 
+            by = c("year", "metrica")) 
+
+cal_mets
+```
+
+```{r}
+cal_mets |> 
+  mutate(across(starts_with("modelo"), ~ round(100 * .x, 4)),
+         metrica = if_else(metrica == "root_square_bias", 
+                           "Root square bias", metrica)) |> 
+  as_grouped_data(groups = "year") |> 
+  flextable::as_flextable(hide_grouplabel = TRUE) |> 
+  autofit() |>  
+  set_header_labels(
+    year = "Time horizon", 
+    metrica = "Performance measure", 
+    modeloA = "Method A\n(%)", 
+    modeloB = "Method B\n(%)", 
+    modeloC = "Method C\n(%)", 
+    modeloD = "Method D\n(%)" 
+  ) |> 
+  bold(i = c(1, 7), j = 1) |> 
+  set_caption("Table. Moderate Calibration Metrics") |>  
+  theme_booktabs() |>   
+  bold(bold = TRUE, part = "header") -> table_cal_mod
+
+table_cal_mod %>% 
+  flextable::save_as_docx(path = here("Tables", "Main-Winsorize-1_5", "Table_Imputed_Performance_Moderate_Cal_Methods.docx"))
+
+table_cal_mod
+```
+
+
+## Reproducibility Ticket
+
+```{r}
+#| label: repro_ticket
+#| column: page
+#| echo: true
+sessionInfo()
+```

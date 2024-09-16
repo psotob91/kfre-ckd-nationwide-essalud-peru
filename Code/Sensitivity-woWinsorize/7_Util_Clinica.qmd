@@ -1,0 +1,421 @@
+---
+title: "External validation, recalibration, and clinical utility of the prognostic model kidney failure risk equation in patients with CKD stages G3-4: a nationwide retrospective cohort analysis in Peru" 
+subtitle: "Main Analysis - Winsorization 1.5%: 7. Clinical Utility"
+author: "Percy Soto Becerra"
+format: 
+  html: 
+   theme: cerulean
+   toc: true
+   number-sections: true
+   df-print: paged
+   page-layout: full
+   embed-resources: true
+   cache: false
+execute: 
+  warning: false
+---
+
+## Setup
+
+```{r}
+#| label: load-packages
+#| include: true
+
+rm(list = ls())
+
+# Use pacman to check whether packages are installed, if not load
+if (!require("pacman")) install.packages("pacman")
+library(pacman)
+
+# Unload all package to begin in a session with only base package
+
+# Install packages
+pacman::p_load(
+  rio, 
+  here, 
+  tidyverse, 
+  # gtools, 
+  knitr, 
+  kableExtra, 
+  ggsci, 
+  patchwork,
+  # flextable, 
+  furrr,
+  parallel,
+  mice,
+  # survival,
+  # prodlim, 
+  # cmprsk,
+  # riskRegression,
+  # pec, 
+  # splines, 
+  dcurves,
+  RColorBrewer
+)
+```
+
+```{r}
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+```
+
+## Load data
+
+```{r}
+# Import data
+imp.datos<- readRDS(here::here("Data", "Tidy", "Sensitivity-woWinsorize",  "data_impA.rds")) |> 
+  mutate(acr = exp(log_acr), 
+         urine_crea = exp(log_urine_crea), 
+         urine_album = exp(log_urine_album), 
+         acr_cat = case_when(acr < 30 ~ "A1", 
+                             acr <= 300 & acr >= 30 ~ "A2", 
+                             acr > 300 ~ "A3", 
+                             TRUE ~ as.character(NA)), 
+         crit_ietsi = case_when((grf_cat == "G4" | 
+                                (grf_cat == "G3b" & acr_cat == "A3")) & 
+                                  !is.na(acr_cat) & !is.na(grf_cat) ~ 1, 
+                                is.na(acr_cat) | is.na(grf_cat) ~ NA, 
+                                TRUE ~ 0), 
+         crit_nice2014 = case_when((grf_cat == "G4" | 
+                                      (grf_cat == "G3b" & acr > 619.47)) & # 619.47 = 70 mg/mmol
+                                     !is.na(acr) & !is.na(grf_cat) ~ 1, 
+                                   is.na(acr) | is.na(grf_cat) ~ NA, 
+                                   TRUE ~ 0))  
+
+# Note: Conversor of units of uACR: https://www.scymed.com/en/smnxps/psdjb222_c.htm      
+rm(data_imp)
+gc()
+```
+
+## Clinical Utility
+
+```{r}
+imp.datos %>% 
+  count(eventdf)
+```
+
+## Select a imputed dataset
+
+```{r}
+# Original KFRE
+imp.datos <- imp.datos %>% 
+    mutate(risk2y = kfre_pr(imp.datos, 2),
+         risk5y = kfre_pr(imp.datos, 5), 
+         pi = kfre_pi(imp.datos)) %>% 
+    filter(.imp != 0) 
+
+# Metod A
+df_recal_metA <- import(here("Data", "Tidy", "Sensitivity-woWinsorize",  "equations", "df_recal_modA.rds"))
+
+df_recal_metA2y <- df_recal_metA |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metA5y <- df_recal_metA |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+imp.datos <- imp.datos |> 
+  left_join(df_recal_metA2y, by = ".imp") |> 
+  left_join(df_recal_metA5y, by = ".imp") |> 
+  mutate(risk2y_metA = 1 - st0_imp2y ^ exp(fc_coef_imp2y * pi), 
+        risk5y_metA = 1 - st0_imp5y ^ exp(fc_coef_imp5y * pi)) |> 
+  select(.imp, .id, time, eventd, eventdf, pi, starts_with("risk2y"), 
+         starts_with("risk5y"), crit_ietsi, crit_nice2014)
+
+# Metod B
+df_recal_metB <- import(here("Data", "Tidy", "Sensitivity-woWinsorize",  "equations", "df_recal_modB.rds"))
+
+df_recal_metB2y <- df_recal_metB |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metB5y <- df_recal_metB |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+imp.datos <- imp.datos |> 
+  left_join(df_recal_metB2y, by = ".imp") |> 
+  left_join(df_recal_metB5y, by = ".imp") |> 
+  mutate(risk2y_metB = 1 - st0_imp2y ^ exp(fc_coef_imp2y * pi), 
+        risk5y_metB = 1 - st0_imp5y ^ exp(fc_coef_imp5y * pi)) |> 
+  select(.imp, .id, time, eventd, eventdf, pi, starts_with("risk2y"), 
+         starts_with("risk5y"), crit_ietsi, crit_nice2014)
+
+# Metod C
+df_recal_metC <- import(here("Data", "Tidy", "Sensitivity-woWinsorize",  "equations", "df_recal_modC.rds"))
+
+df_recal_metC2y <- df_recal_metC |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metC5y <- df_recal_metC |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+imp.datos <- imp.datos |> 
+  left_join(df_recal_metC2y, by = ".imp") |> 
+  left_join(df_recal_metC5y, by = ".imp") |> 
+  mutate(risk2y_metC = 1 - st0_imp2y ^ exp(fc_coef_imp2y * pi), 
+        risk5y_metC = 1 - st0_imp5y ^ exp(fc_coef_imp5y * pi)) |> 
+  select(.imp, .id, time, eventd, eventdf, pi, starts_with("risk2y"), 
+         starts_with("risk5y"), crit_ietsi, crit_nice2014)
+
+# Metod D
+df_recal_metD <- import(here("Data", "Tidy", "Sensitivity-woWinsorize",  "equations", "df_recal_modD.rds"))
+
+df_recal_metD2y <- df_recal_metD |> 
+  filter(year == 2) |> 
+  select(-year) |> 
+  rename(st0_imp2y = st0_imp, 
+         fc_coef_imp2y = fc_coef_imp)
+
+df_recal_metD5y <- df_recal_metD |> 
+  filter(year == 5) |> 
+  select(-year) |> 
+  rename(st0_imp5y = st0_imp, 
+         fc_coef_imp5y = fc_coef_imp)
+
+imp.datos <- imp.datos |> 
+  left_join(df_recal_metD2y, by = ".imp") |> 
+  left_join(df_recal_metD5y, by = ".imp") |> 
+  mutate(risk2y_metD = 1 - st0_imp2y ^ exp(fc_coef_imp2y * pi), 
+        risk5y_metD = 1 - st0_imp5y ^ exp(fc_coef_imp5y * pi)) |> 
+  select(.imp, .id, time, eventd, eventdf, pi, starts_with("risk2y"), 
+         starts_with("risk5y"), crit_ietsi, crit_nice2014)
+```
+
+```{r}
+imp.datos_filter <- imp.datos |>  
+  filter(.imp > 0)
+```
+
+### 5-years
+
+```{r}
+# Configura furrr para usar 10 núcleos
+n_cores <- (detectCores() - 2) / 2
+plan(multisession, workers = n_cores)
+
+# Define la función para calcular las curvas de beneficio neto
+calculate_net_benefit <- function(imp_data) {
+  net_curves <- dca(Surv(time, eventdf) ~ risk5y + risk5y_metA + risk5y_metB + 
+                      risk5y_metC + risk5y_metD + crit_ietsi + crit_nice2014,  
+                    data = imp_data, 
+                    time = 5, 
+                    thresholds = seq(0.00, 0.06, 0.01), 
+                    label = list(risk5y = "KFRE original", 
+                                 risk5y_metA = "KFRE recalibrated with method A", 
+                                 risk5y_metB = "KFRE recalibrated with method B",
+                                 risk5y_metC = "KFRE recalibrated with method C", 
+                                 risk5y_metD = "KFRE recalibrated with method D", 
+                                 crit_ietsi = "Peruvian National Guidelines", 
+                                 crit_nice2014 = "NICE 2014 Guidelines")) |> 
+    net_intervention_avoided()
+  
+  net_curves_df <- as_tibble(net_curves)
+  net_curves_df
+}
+
+# Filtra los datos por número de imputación
+imputations <- unique(imp.datos_filter$.imp)
+
+# Aplica la función a cada conjunto de datos imputado
+results <- future_map(imputations, function(imp_num) {
+  imp_data <- filter(imp.datos_filter, .imp == imp_num)
+  calculate_net_benefit(imp_data)
+})
+
+# Combina los resultados en un solo tibble
+final_net_benefit5y <- bind_rows(results, .id = "imputation")
+
+# Cierra la sesión de future y libera los recursos utilizados
+plan(sequential)
+future:::ClusterRegistry("stop")
+
+## Pool de curvas de decision
+average_imputations <- function(df) {
+  df %>%
+    group_by(variable, label, n, threshold) %>%
+    summarize(
+      pos_rate = mean(pos_rate),
+      tp_rate = mean(tp_rate),
+      fp_rate = mean(fp_rate),
+      harm = mean(harm),
+      net_benefit = mean(net_benefit),
+      net_intervention_avoided = mean(net_intervention_avoided, na.rm = TRUE), 
+      .groups = "drop"
+    )
+}
+
+pooled_net_benefit5y <- average_imputations(final_net_benefit5y)
+
+## Guardar datos par curva de beneficio
+export(final_net_benefit5y , here("Data", "Tidy", "Sensitivity-woWinsorize",  "final_net_benefit5y.rds"))
+export(pooled_net_benefit5y, here("Data", "Tidy", "Sensitivity-woWinsorize",  "pooled_net_benefit5y.rds"))
+
+# Define una paleta de colores seria usando Dark2
+color_palette <- brewer.pal(8, "Dark2")
+```
+
+
+```{r}
+# Filtra los datos y crea el gráfico
+p1 <- pooled_net_benefit5y %>%
+  filter(!is.na(net_benefit)) %>%
+  mutate(label = fct_recode(label, 
+                            "Referral All" = "Treat All", 
+                            "Referrall None" = "Treat None")) |> 
+  ggplot(aes(x = threshold, y = net_benefit, color = label, linetype = label)) +
+  geom_line(size = 1, alpha = 0.8) +
+  coord_cartesian(ylim = c(-0.01, 0.05)) +
+  scale_x_continuous(breaks = seq(0.00, 0.06, 0.01), 
+                     labels = c("0%\n(0:100)", "1%\n(1:99)", "2%\n(1:49)", 
+                                "3%\n(1:33)", "4%\n(1:25)", 
+                                "5%\n(1:19)", "6%\n(1:17)")) +
+  labs(x = "Threshold Probability\n(Harm:Benefit ratio)", y = "Net Benefit", color = "", linetype = "", 
+       title = "5-years") +
+  theme_bw() + 
+  scale_fill_npg("nrc") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+p1
+```
+
+#### Table of benefit curves
+
+```{r}
+pooled_net_benefit5y |> 
+  filter(threshold %in% c(seq(0.00, 0.06, by = 0.01))) |> 
+  select(label, threshold, net_benefit, net_intervention_avoided) |> 
+  pivot_wider(id_cols = threshold, names_from = label, values_from = c(net_benefit)) |> 
+  kbl() |> 
+  kable_styling()
+```
+
+### 2-years
+
+```{r}
+# Configura furrr para usar 10 núcleos
+plan(multisession, workers = n_cores)
+
+# Define la función para calcular las curvas de beneficio neto
+calculate_net_benefit <- function(imp_data) {
+  net_curves <- dca(Surv(time, eventdf) ~ risk2y + risk2y_metA + risk2y_metB + 
+                      risk2y_metC + risk2y_metD + crit_ietsi + crit_nice2014,  
+                    data = imp_data, 
+                    time = 2, 
+                    thresholds = seq(0.00, 0.50, 0.1), 
+                    label = list(risk2y = "KFRE original", 
+                                 risk2y_metA = "KFRE recalibrated with method A", 
+                                 risk2y_metB = "KFRE recalibrated with method B",
+                                 risk2y_metC = "KFRE recalibrated with method C", 
+                                 risk2y_metD = "KFRE recalibrated with method D", 
+                                 crit_ietsi = "Peruvian National Guidelines", 
+                                 crit_nice2014 = "NICE 2014 Guidelines")) |> 
+    net_intervention_avoided()
+  
+  net_curves_df <- as_tibble(net_curves)
+  net_curves_df
+}
+
+# Filtra los datos por número de imputación
+imputations <- unique(imp.datos_filter$.imp)
+
+# Aplica la función a cada conjunto de datos imputado
+results <- future_map(imputations, function(imp_num) {
+  imp_data <- filter(imp.datos_filter, .imp == imp_num)
+  calculate_net_benefit(imp_data)
+})
+
+# Combina los resultados en un solo tibble
+final_net_benefit2y <- bind_rows(results, .id = "imputation")
+
+# Cierra la sesión de future y libera los recursos utilizados
+plan(sequential)
+future:::ClusterRegistry("stop")
+
+## Pool de curvas de decision
+pooled_net_benefit2y <- average_imputations(final_net_benefit2y)
+
+## Guardar datos par curva de beneficio
+export(final_net_benefit2y , here("Data", "Tidy", "Sensitivity-woWinsorize",  "final_net_benefit2y.rds"))
+export(pooled_net_benefit2y, here("Data", "Tidy", "Sensitivity-woWinsorize",  "pooled_net_benefit2y.rds"))
+
+# Define una paleta de colores seria usando Dark2
+color_palette <- brewer.pal(8, "Dark2")
+```
+
+
+```{r}
+# Filtra los datos y crea el gráfico
+p2 <- pooled_net_benefit2y %>%
+  filter(!is.na(net_benefit)) %>%  
+  mutate(label = fct_recode(label, 
+                            "Referral All" = "Treat All", 
+                            "Referrall None" = "Treat None")) |> 
+  ggplot(aes(x = threshold, y = net_benefit, color = label, linetype = label)) +
+  geom_line(size = 1, alpha = 0.8) +
+  coord_cartesian(ylim = c(-0.005, 0.03)) +
+  scale_x_continuous(labels = c("0%\n(0:100)", "10%\n(1:9)", "20%\n(1:5)", 
+                                "30%\n(1:2.3)", "40%\n(1:1.5)", "50%\n(1:1)")) +
+  labs(x = "Threshold Probability\n(Harm:Benefit ratio)", y = "Net Benefit", color = "", linetype = "", 
+       title = "2-years") +
+  theme_bw() + 
+  scale_fill_npg("nrc") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+p_final <- p2 + p1 + 
+  plot_annotation(tag_levels = "a") +
+  plot_layout(guides = 'collect')
+
+ggsave(filename = "net_benefit.jpeg", 
+       plot = p_final, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize"), 
+       scale = 2, 
+       width = 12, 
+       height = 6, 
+       units = "cm", 
+       dpi = 1000)
+```
+
+```{r}
+p2
+```
+
+#### Table of benefit curves
+
+```{r}
+pooled_net_benefit2y |> 
+  filter(threshold %in% c(seq(0.00, 0.50, by = 0.1))) |> 
+  select(label, threshold, net_benefit, net_intervention_avoided) |> 
+  pivot_wider(id_cols = threshold, names_from = label, values_from = c(net_benefit)) |> 
+  kbl() |> 
+  kable_styling()
+```
+
+```{r}
+include_graphics(here("Figures", "Sensitivity-woWinsorize",  "net_benefit.jpeg"))
+```
+
+## Ticket de reproducibilidad
+
+```{r}
+sessionInfo()
+```
+

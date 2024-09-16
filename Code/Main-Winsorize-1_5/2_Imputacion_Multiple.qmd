@@ -1,0 +1,352 @@
+---
+title: "External validation, recalibration, and clinical utility of the prognostic model kidney failure risk equation in patients with CKD stages G3-4: a nationwide retrospective cohort analysis in Peru" 
+subtitle: "Main Analysis - Winsorization 1.5%: 2. Multiple Imputation"
+author: "Percy Soto Becerra"
+format: 
+  html: 
+   theme: cerulean
+   toc: true
+   number-sections: true
+   df-print: paged
+   page-layout: full
+   embed-resources: true
+   cache: true
+   lightbox: true
+execute: 
+  warning: false
+---
+
+## Setup
+
+```{r}
+#| label: load-packages
+#| include: true
+
+rm(list = ls())
+
+# Use pacman to check whether packages are installed, if not load
+if (!require("pacman")) install.packages("pacman")
+library(pacman)
+
+# Unload all package to begin in a session with only base packages
+pacman::p_unload("all")
+
+# Install packages
+pacman::p_load(
+  rio, 
+  here, 
+  survival,
+  kableExtra,
+  tidyverse,
+  labelled, 
+  sjlabelled, 
+  patchwork,
+  VIM, 
+  mice,
+  ggmice,
+  naniar, 
+  parallel, 
+  Hmisc,
+  rms,
+  summarytools,
+  htmltools,   
+  kableExtra, 
+  visdat, 
+  srvyr
+)
+
+st_options(plain.ascii = FALSE, style = "rmarkdown")
+
+# theme_gtsummary_language(language = "es")
+set.seed(2014)
+```
+
+## Load data
+
+```{r}
+# Import data
+dataA_imp <- import(here("Data", "Tidy", "Main-Winsorize-1_5", "dataA_imp.rds")) |> 
+  select("dm", "dm_cumhaz1", "dm_cumhaz2", 
+         "hta", "hta_cumhaz1", "hta_cumhaz2", 
+         "log_urine_crea", "log_urine_crea_cumhaz1", "log_urine_crea_cumhaz2",  
+         "log_acr", "log_acr_cumhaz1", "log_acr_cumhaz2",  
+         "log_urine_album",  "log_urine_album_cumhaz1", "log_urine_album_cumhaz2", 
+         "sex", "sex_cumhaz1", "sex_cumhaz2", 
+         "age", "age_cumhaz1", "age_cumhaz2", 
+         "eGFR_ckdepi", "eGFR_ckdepi_cumhaz1", "eGFR_ckdepi_cumhaz2", "cas2",
+         "cas2_cumhaz1", "cas2_cumhaz2", 
+         "eventd5ylab", 
+         "cumhaz1", "cumhaz2", everything())
+```
+
+## Explore data missing
+
+::: {.panel-tabset}
+
+## Missing by variable
+
+```{r}
+dataA_imp |> 
+  miss_var_summary() |> 
+  kbl() |> 
+  kable_styling()
+```
+
+## Pattern
+
+```{r}
+#| fig-width: 12
+dataA_imp |> 
+  select("dm", "dm_cumhaz1", "dm_cumhaz2", 
+         "hta", "hta_cumhaz1", "hta_cumhaz2", 
+         "log_urine_crea", "log_urine_crea_cumhaz1", "log_urine_crea_cumhaz2",  
+         "log_acr", "log_acr_cumhaz1", "log_acr_cumhaz2",  
+         "log_urine_album",  "log_urine_album_cumhaz1", "log_urine_album_cumhaz2", 
+         "sex", "sex_cumhaz1", "sex_cumhaz2", 
+         "age", "age_cumhaz1", "age_cumhaz2", 
+         "eGFR_ckdepi", "eGFR_ckdepi_cumhaz1", "eGFR_ckdepi_cumhaz2", "cas2",
+         "cas2_cumhaz1", "cas2_cumhaz2", 
+         "eventd5ylab", 
+         "cumhaz1", "cumhaz2") |> 
+  plot_pattern(rotate = TRUE)
+```
+
+
+## Upset plot
+
+```{r}
+#| fig-width: 12
+dataA_imp |> 
+  select("dm", "dm_cumhaz1", "dm_cumhaz2", 
+         "hta", "hta_cumhaz1", "hta_cumhaz2", 
+         "log_urine_crea", "log_urine_crea_cumhaz1", "log_urine_crea_cumhaz2",  
+         "log_acr", "log_acr_cumhaz1", "log_acr_cumhaz2",  
+         "log_urine_album",  "log_urine_album_cumhaz1", "log_urine_album_cumhaz2", 
+         "sex", "sex_cumhaz1", "sex_cumhaz2", 
+         "age", "age_cumhaz1", "age_cumhaz2", 
+         "eGFR_ckdepi", "eGFR_ckdepi_cumhaz1", "eGFR_ckdepi_cumhaz2", "cas2",
+         "cas2_cumhaz1", "cas2_cumhaz2", 
+         "eventd5ylab", 
+         "cumhaz1", "cumhaz2") |> 
+  gg_miss_upset(nsets = 50)
+```
+
+## Correlation
+
+```{r}
+#| fig-width: 12
+dataA_imp |> 
+  select("dm", "dm_cumhaz1", "dm_cumhaz2", 
+         "hta", "hta_cumhaz1", "hta_cumhaz2", 
+         "log_urine_crea", "log_urine_crea_cumhaz1", "log_urine_crea_cumhaz2",  
+         "log_acr", "log_acr_cumhaz1", "log_acr_cumhaz2",  
+         "log_urine_album",  "log_urine_album_cumhaz1", "log_urine_album_cumhaz2", 
+         "sex", "sex_cumhaz1", "sex_cumhaz2", 
+         "age", "age_cumhaz1", "age_cumhaz2", 
+         "eGFR_ckdepi", "eGFR_ckdepi_cumhaz1", "eGFR_ckdepi_cumhaz2", "cas2",
+         "cas2_cumhaz1", "cas2_cumhaz2", 
+         "eventd5ylab", 
+         "cumhaz1", "cumhaz2") |> 
+  select(where(is.numeric)) |> 
+  vis_cor(cor_method = "spearman")
+```
+:::
+
+
+## Set data
+
+```{r}
+d <- datadist(dataA_imp)
+d$limits
+```
+::: {.panel-tabset}
+
+## Data exploration
+
+```{r}
+#| fig-width: 12
+# Lista de variables para el eje x
+variables_x <- c("dm", "hta", "log_urine_crea", "log_acr", "log_urine_album", 
+                 "sex",  "age", "eGFR_ckdepi", "cas2", "eventd5ylab", "cumhaz1", 
+                 "cumhaz2")
+
+# Crear una lista para almacenar los gráficos
+graficos <- list()
+
+# Generar gráficos para cada variable y almacenarlos en la lista
+for (var in variables_x) {
+  p <- dataA_imp %>%
+    ggplot(aes(x = .data[[var]], y = log_acr)) +
+    geom_miss_point(alpha = 0.25) +    
+    geom_smooth(method = "loess", alpha = 0.1) + 
+    theme_classic() + 
+    labs(x = attributes(dataA_imp[[var]])$label, 
+         y = attributes(dataA_imp[["log_acr"]])$label)
+  
+  graficos[[var]] <- p
+}
+
+(
+  (graficos[[variables_x[1]]] | graficos[[variables_x[2]]] | graficos[[variables_x[3]]] | graficos[[variables_x[4]]]) /  
+  (graficos[[variables_x[5]]] | graficos[[variables_x[6]]] | graficos[[variables_x[7]]] | graficos[[variables_x[8]]]) /  
+  (graficos[[variables_x[9]]] | graficos[[variables_x[10]]] | graficos[[variables_x[11]]] | graficos[[variables_x[12]]])     
+) + 
+  plot_layout(guides = 'collect')
+```
+
+## Influx/Outflux
+
+```{r}
+#| fig-width: 12
+dataA_imp |> 
+  select("dm", "hta", "log_urine_crea", "log_acr", "log_urine_album", 
+         "sex",  "age", "eGFR_ckdepi", "cas2", "eventd5ylab", "cumhaz1", 
+         "cumhaz2") |>   
+  flux() |> 
+  arrange(desc(outflux)) |> 
+  kbl() |> 
+  kable_styling()
+```
+
+
+```{r}
+#| fig-width: 12
+dataA_imp |> 
+  select("dm", "hta", "log_urine_crea", "log_acr", "log_urine_album", 
+         "sex",  "age", "eGFR_ckdepi", "cas2", "eventd5ylab", "cumhaz1", 
+         "cumhaz2") |> 
+  plot_flux(label = FALSE) -> plot_influx
+
+# Primero, averiguamos cuántas capas hay.
+num_layers <- length(plot_influx$layers)
+
+# Examinamos cada capa para encontrar la geom_point() que no deseamos.
+# Esto imprimirá las capas y deberías buscar la que contiene la geom_point sin shape.
+for (i in 1:num_layers) {
+  print(plot_influx$layers[[i]])
+}
+
+# Eliminamos la capa geom_point que no queremos.
+# La salida muestra que es la segunda capa, así que la eliminamos.
+plot_influx$layers <- plot_influx$layers[-2] 
+
+# Asegúrate de tener suficientes formas para cada nivel único de la variable.
+unique_vrbs <- unique(plot_influx$data$vrb)
+shapes <- seq_along(unique_vrbs)
+
+# Ahora deberías volver a agregar la capa geom_point con las formas y colores adecuados.
+plot_influx <- plot_influx + 
+  geom_jitter(aes(shape = vrb, colour = vrb), width = 0.025, height = 0.025) +
+  scale_shape_manual(values = shapes) +
+  guides(colour = guide_legend(override.aes = list(shape = shapes)),
+         shape = FALSE)
+
+plot_influx 
+```
+
+:::
+
+
+## Multiple imputation
+
+```{r}
+nimp <- 100
+B <- 1000
+
+set.seed(2014)
+datos_imp <- aregImpute(formula = ~ dm + dm_cumhaz1 + dm_cumhaz2 + 
+                          hta + hta_cumhaz1 + hta_cumhaz2 + 
+                          log_urine_crea + 
+                          log_urine_crea_cumhaz1 + log_urine_crea_cumhaz2 + 
+                          log_acr + 
+                          log_acr_cumhaz1 + log_acr_cumhaz2 + 
+                          log_urine_album + 
+                          log_urine_album_cumhaz1 + log_urine_album_cumhaz2 + 
+                          sex + sex_cumhaz1 + sex_cumhaz2 + 
+                          age + age_cumhaz1 + age_cumhaz2+ 
+                          eGFR_ckdepi + 
+                          eGFR_ckdepi_cumhaz1 + eGFR_ckdepi_cumhaz2 + 
+                          eventd5ylab + cumhaz1 + cumhaz2, 
+                data = dataA_imp, 
+                n.impute = nimp, 
+                nk = 3, 
+                plotTrans = FALSE, 
+                burnin = 10,
+                B = B)
+```
+
+
+```{r}
+datos_nab <- dataA_imp |>  
+  mutate(.id = 1:n()) |> 
+  select(.id, dm, dm_cumhaz1, dm_cumhaz2, hta, hta_cumhaz1, hta_cumhaz2, crea,  
+         log_urine_crea, log_urine_crea_cumhaz1, log_urine_crea_cumhaz2, 
+         log_acr, log_acr_cumhaz1, log_acr_cumhaz2, log_urine_album, 
+         log_urine_album_cumhaz1, log_urine_album_cumhaz2, 
+         sex, sex_cumhaz1, sex_cumhaz2, age, age_cumhaz1, age_cumhaz2, 
+         eGFR_ckdepi,  eGFR_ckdepi_cumhaz1, eGFR_ckdepi_cumhaz2, 
+         eventd5ylab, cumhaz1, cumhaz2, cas, cas2, grf_cat, 
+         eventd2ylab, eventd5y,  death5y, death2y, eventd, eventdf, time, time5y) 
+  # nabular() |> 
+  # add_label_shadow()
+
+cols_to_impute <- c("dm", "dm_cumhaz1", "dm_cumhaz2", 
+                    "hta", "hta_cumhaz1", "hta_cumhaz2", 
+                    "log_urine_crea", "log_urine_crea_cumhaz1", 
+                    "log_urine_crea_cumhaz2", 
+                    "log_acr", "log_acr_cumhaz1", "log_acr_cumhaz2", 
+                    "log_urine_album", 
+                    "log_urine_album_cumhaz1", "log_urine_album_cumhaz2")
+
+imputed_list <- list()
+
+for (i in 1:nimp) {
+  datos_imputed <- datos_nab |> 
+    mutate(across(all_of(cols_to_impute), 
+                  ~ ifelse(is.na(.), datos_imp$imputed[[cur_column()]][,i], .)))
+  imputed_list[[i]] <- datos_imputed
+}
+
+# Fusionar la lista en un solo data frame con columna .imp
+datos_stack <- bind_rows(imputed_list, .id = ".imp") |> 
+  mutate(.imp = as.integer(.imp), 
+         wg = 1 / max(nimp)) 
+
+datos_nab <- datos_nab |> 
+  mutate(.imp = 0, 
+         wg = 1)
+
+# Ordenar datos
+datos_nab <- datos_nab |> 
+  select(colnames(datos_stack))
+
+# Lista de variables de factores
+factor_vars <- c("dm", "hta", "sex")
+
+# Transferir niveles y etiquetas de factores de df1 a df2
+datos_stack <- datos_stack |> 
+  mutate(across(all_of(factor_vars), ~ factor(., levels = sort(unique(datos_stack[[cur_column()]])), 
+                                               labels = levels(dataA_imp[[cur_column()]]))))
+
+datos_stack <- set_variable_labels(datos_stack, 
+                                   .labels = get_label(datos_nab), 
+                                   .strict = FALSE)
+
+datos_stack <- datos_nab |> 
+  bind_rows(datos_stack)
+
+datos_stack_svy <- datos_stack |> 
+  as_survey_design(weights = wg)
+
+saveRDS(datos_stack, here("Data", "Tidy", "Main-Winsorize-1_5", "data_impA.rds"))
+```
+
+## Reproducibility Ticket
+
+```{r}
+#| label: repro_ticket
+#| column: page
+#| echo: true
+sessionInfo()
+```
+

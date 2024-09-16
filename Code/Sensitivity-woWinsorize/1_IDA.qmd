@@ -1,0 +1,802 @@
+---
+title: "External validation, recalibration, and clinical utility of the prognostic model kidney failure risk equation in patients with CKD stages G3-4: a nationwide retrospective cohort analysis in Peru" 
+subtitle: "Main Analysis - Winsorization 1.5%: 1. Initial data analysis"
+author: "Percy Soto Becerra"
+format: 
+  html: 
+   theme: cerulean
+   toc: true
+   number-sections: true
+   df-print: paged
+   page-layout: full
+   embed-resources: true
+   cache: true
+execute: 
+  warning: false
+---
+
+## Setup
+
+```{r}
+#| label: load-packages
+#| include: true
+
+rm(list = ls())
+
+# Use pacman to check whether packages are installed, if not load
+if (!require("pacman")) install.packages("pacman")
+
+library(pacman)
+
+# Install packages
+pacman::p_load(
+  here, 
+  rio, 
+  dplyr, 
+  kableExtra, 
+  patchwork, 
+  DescTools, 
+  tidyverse, 
+  janitor, 
+  survival, 
+  naniar, 
+  ggmice, 
+  dplyr, 
+  knitr
+)
+```
+
+## Cargar datos 
+
+Los datos completos se muestran a continuación, luego de seleccionar a las variables con las que trabajaremos:
+
+```{r}
+# Import data
+data <- readRDS(here::here("Data", "Tidy", "integrated_total_data.rds")) |> 
+  select(cas, sex, age, hta, dm, crea, 
+         ckd_stage, ckd_stage2, 
+         eGFR_ckdepi, acr, urine_album, 
+         urine_crea, time5y, eventd5y, 
+         grf_cat, acr_cat, ckd_class,
+         death2y, eventd2ylab, death5y, 
+         eventd5ylab, eventd, eventdf, time) 
+
+data |> 
+  glimpse()
+```
+
+## Initial Data Analysis
+
+We will begin by identifying implausible time data. It is evident that all implausible time data belong to individuals who experienced kidney failure, and this implausibility is due to negative event times. Regarding missing data, we observe that time data is missing in both individuals who did not report kidney failure and those who did. As expected, there were no missing time data for individuals who passed away, since these records come from the insured's office, which cross-references data with RENIEC. Additionally, a significant group of individuals had missing time and event data (it is unknown whether they developed kidney failure or passed away).
+
+```{r}
+data |> 
+  bind_rows(data |> 
+              mutate(eventdf = as.character("Total"))) |> 
+  mutate(eventdf = factor(eventdf, 
+                          levels = c("Alive without Kidney Failure", 
+                                     "Kidney Failure", 
+                                     "Dead without Kidney Failure", 
+                                     "Total",
+                                     "Missing Data"))) |> 
+  count(time, eventdf) |> 
+  mutate(time = case_when(is.na(time) ~ 15, 
+                          TRUE ~ time), 
+         time_tipo = case_when(time > 0 & time < 15 ~ "Plausible Value", 
+                               time <= 0 ~ "Implausible Value", 
+                               time == 15 ~ "Missing Data", 
+                               TRUE ~ as.character(NA))) |> 
+  ggplot(aes(x = time, y = n, color = time_tipo)) +
+  geom_point(shape = 21, alpha = 0.5) + 
+  geom_vline(xintercept = 0.1, linetype = 2, color = "red") +
+  scale_y_continuous(trans = "log10") + 
+  labs(color = "Data type") + 
+  facet_wrap(. ~ eventdf) + 
+  theme_bw() -> p_tiempo_perdido
+
+ggsave(filename = "p_tiempo_perdido.jpeg", 
+       plot = p_tiempo_perdido, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic"), 
+       scale = 2.5, 
+       width = 9,
+       height = 9, 
+       units = "cm", 
+       dpi = 1000, 
+       bg = "white") 
+```
+
+```{r}
+#| echo: false
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic", "p_tiempo_perdido.jpeg"))
+```
+
+Regarding the distribution of this missing data, we have the following:
+
+```{r}
+data |> 
+  mutate(time_tipo = case_when(time > 0 & time < 15 ~ "Valor Plausible", 
+                               time <= 0 | time >= 15 ~ "Valor Implausible", 
+                               is.na(time) ~ "Dato perdido", 
+                               TRUE ~ as.character(NA))) |> 
+  tabyl(time_tipo) |> 
+  adorn_pct_formatting() -> tabla_tiempo_perdidos
+
+tabla_tiempo_perdidos |> 
+  kbl() |> 
+  kable_styling()
+```
+
+The percentage of missing time data is  `r tabla_tiempo_perdidos |> filter(time_tipo == "Dato perdido") |> pull(percent)`  (n = `r tabla_tiempo_perdidos |> filter(time_tipo == "Dato perdido") |> pull(n)`). Additionally, the number of implausible time values is minimal, representing `r tabla_tiempo_perdidos |> filter(time_tipo == "Valor Implausible") |> pull(percent)`  (n = `r tabla_tiempo_perdidos |> filter(time_tipo == "Valor Implausible") |> pull(n)`).
+
+## Selection of individuals for analysis
+
+- The number of individuals under 18 years old is as follows:
+
+```{r}
+data_eleg <- data |> 
+  filter(age >= 18, ckd_stage == "Stages 3-4")
+
+nrow(data_eleg )
+```
+
+```{r}
+data_noeleg_age_menos18 <- data |> 
+  filter(age < 18)
+
+nrow(data_noeleg_age_menos18)
+```
+
+- The number of individuals with missing age data is as follows:
+
+```{r}
+data_noeleg_age_na <- data |> 
+  filter(is.na(age))
+
+nrow(data_noeleg_age_na)
+```
+
+- The number of individuals with a CKD diagnosis other than stage 3a-4 is as follows:
+
+```{r}
+data_noeleg_ckd12 <- data |> 
+  filter(ckd_stage == "Stages 1-2 y 5", eGFR_ckdepi >= 60)
+
+nrow(data_noeleg_ckd12)
+```
+
+```{r}
+data_noeleg_ckd5 <- data |> 
+  filter(ckd_stage == "Stages 1-2 y 5", eGFR_ckdepi < 15)
+
+nrow(data_noeleg_ckd5)
+```
+
+- The number of individuals with missing CKD diagnosis data is as follows:
+
+```{r}
+data_noeleg_ckd_na <- data |> 
+  filter(is.na(ckd_stage))
+
+nrow(data_noeleg_ckd_na)
+```
+
+- The number of individuals with ineligible age or CKD stages is as follows:
+
+```{r}
+data_noeleg_ckd_age <- data |> 
+  filter(ckd_stage == "Stages 1-2 y 5" | age < 18)
+
+nrow(data_noeleg_ckd_age)
+```
+
+- The number of individuals with missing age data or missing CKD stages data is as follows:
+
+```{r}
+data_noeleg_ckd_age_na <- data |> 
+  filter(is.na(ckd_stage) | is.na(age))
+
+nrow(data_noeleg_ckd_age_na)
+```
+
+- The number of potentially eligible individuals, either due to being within the age or CKD stages range or having missing data, is as follows:
+
+```{r}
+data_eleg_potent <- data |> 
+  filter((age >= 18 | is.na(age)) & (ckd_stage == "Stages 3-4" | is.na(ckd_stage)))
+
+nrow(data_eleg_potent)
+```
+
+- The number of individuals included in stages 3a-4 is as follows:
+
+```{r}
+data_includ <- data_eleg |> 
+  filter(time > 0, !is.na(eventd))
+
+nrow(data_includ)
+```
+
+- The number of individuals included in stages 3b-4 is as follows:
+
+```{r}
+data_includ2 <- data_includ |> 
+  filter(ckd_stage2 == "Stages 3b-4")
+
+nrow(data_includ2)
+```
+
+- The data excluded due to implausible or missing time values are as follows:
+
+```{r}
+datos_exclud_time_implau <- data_eleg |> 
+  filter(time <= 0)
+
+nrow(datos_exclud_time_implau)
+```
+
+- The data excluded due to missing time data are as follows:
+
+```{r}
+datos_exclud_time_na <- data_eleg |> 
+  filter(is.na(time))
+
+nrow(datos_exclud_time_na)
+``` 
+
+- The data excluded due to missing outcome status are as follows:
+
+```{r}
+datos_exclud_eventd_na <- data_eleg |> 
+  filter(is.na(eventd))
+
+nrow(datos_exclud_eventd_na)
+``` 
+
+- The data excluded due to missing outcome status/time or implausible time are as follows:
+
+```{r}
+datos_exclud_time_eventd <- data_eleg |> 
+  filter(is.na(eventd) | is.na(time) | time <= 0)
+
+nrow(datos_exclud_time_eventd)
+``` 
+
+## Flowchart of Participant Selection/Inclusion
+
+```{r}
+# Create grid of 100 x 100----
+data_flow <- tibble(x = 1:100, y = 1:100)
+
+data_flow %>%
+  ggplot(aes(x, y)) +
+  scale_x_continuous(minor_breaks = seq(1, 100, 1)) +
+  scale_y_continuous(minor_breaks = seq(1, 100, 1)) +
+  theme_linedraw() -> p
+
+# Create boxes----
+box_xmin <- 33 - 20
+box_xmax <- 75 - 20
+box_ymin <- 94
+box_ymax <- 99
+box_size <- 0.25
+
+text_param <- function(box_min, box_max) {
+  mean(c(box_min, box_max))
+}
+
+text_size <- 2
+
+p +
+  # Column 0----
+  ## Level 1----
+  geom_rect(xmin = box_xmin, xmax = box_xmax,
+            ymin = box_ymin - 1, ymax = box_ymax + 1,
+            color = "black", fill = "white",
+            size = box_size) +
+  annotate('text',
+           x = text_param(box_xmin, box_xmax),
+           y = text_param(box_ymin - 1, box_ymax + 1),
+           label = str_glue('Total patients in VISARE database\n(n = {nrow(data)})'),
+           size = text_size) +
+  ## Level 1.5----
+  geom_rect(xmin = box_xmin, xmax = box_xmax,
+            ymin = box_ymin - 27 - 2, ymax = box_ymax - 27 + 2,
+            color = "black", fill = "white",
+            size = box_size) +
+  annotate('text',
+           x = text_param(box_xmin, box_xmax),
+           y = text_param(box_ymin - 27, box_ymax - 27),
+           label = str_glue('Total potentially eligible patients\nwith CKD G3a-G4 and ≥ 18 years\n(n = {nrow(data_eleg_potent)})'),
+           size = text_size) +
+  ## Level 2----
+  geom_rect(xmin = box_xmin, xmax = box_xmax,
+            ymin = box_ymin - 50 - 1, ymax = box_ymax - 50 + 1,
+            color = "black", fill = "white",
+            size = box_size) +
+  annotate('text',
+           x = text_param(box_xmin, box_xmax),
+           y = text_param(box_ymin - 50 - 1, box_ymax - 50 + 1),
+           label = str_glue('Total patients included in the study\n(n = {nrow(data_eleg)})'),
+           size = text_size) +
+  # Column -1----
+  geom_rect(xmin = box_xmin, xmax = box_xmax,
+            ymin = box_ymin - 81, ymax = box_ymax - 79,
+            color = "black", fill = "white",
+            size = box_size) +
+  annotate('text',
+           x = text_param(box_xmin, box_xmax),
+           y = text_param(box_ymin - 81, box_ymax - 79),
+           label = str_glue('Patients with CKD G3a-G4\n(n = {nrow(data_includ)})'),
+           size = text_size) +
+  # Column +1----
+  ## Level 1----
+  geom_rect(xmin = box_xmin + 23, xmax = box_xmax + 47,
+            ymin = box_ymin - 19 + 2.5, ymax = box_ymax - 12 + 2.5,
+            color = "black", fill = "white",
+            size = box_size) +
+  annotate('text',
+           x = text_param(box_xmin + 23, box_xmax + 47),
+           y = text_param(box_ymin - 19 + 2.5, box_ymax - 12 + 2.5),
+           label = str_glue(paste0('Not eligible due to age < 18 or CKD at other stages (n = {nrow(data_noeleg_ckd_age)})\n',
+                                   '{nrow(data_noeleg_age_menos18)} were < 18 years old\n',
+                                   '{nrow(data_noeleg_ckd12)} had normal or slightly reduced eGFR (CKD G1 or G2)\n',
+                                   '{nrow(data_noeleg_ckd5)} had renal failure (Stage G5)\n')),
+           size = text_size) +
+  ## Level 1.5----
+  geom_rect(xmin = box_xmin + 23, xmax = box_xmax + 47,
+            ymin = box_ymin - 19 - 25 + 1.5, ymax = box_ymax - 12 - 25 + 1.5,
+            color = "black", fill = "white",
+            size = box_size) +
+  annotate('text',
+           x = text_param(box_xmin + 23, box_xmax + 47),
+           y = text_param(box_ymin - 19 - 25 + 1.5, box_ymax - 12 - 25 + 1.5),
+           label = str_glue(paste0('Excluded due to missing data in selection criteria (n = {nrow(data_noeleg_ckd_age_na)} [{round(100 * nrow(data_noeleg_ckd_age_na)/nrow(data_eleg_potent), 1)}%])\n',
+                                   '{nrow(data_noeleg_age_na)} ({round(100 * nrow(data_noeleg_age_na)/nrow(data_eleg_potent), 1)}%) without evaluation date in VISARE\n',
+                                   '{nrow(data_noeleg_ckd_na)} ({round(100 * nrow(data_noeleg_ckd_na)/nrow(data_eleg_potent), 1)}%) without eGFR data to define CKD stages\n')),
+           size = text_size) +
+  ## Level 2----
+  geom_rect(xmin = box_xmin + 23, xmax = box_xmax + 47,
+            ymin = box_ymin - 19 - 45 - 2, ymax = box_ymax - 12 - 45 - 2,
+            color = "black", fill = "white",
+            size = box_size) +
+  annotate('text',
+           x = text_param(box_xmin + 23, box_xmax + 47),
+           y = text_param(box_ymin - 19 - 45 - 2, box_ymax - 12 - 45 - 2),
+           label = str_glue(paste0('Excluded due to missing/implausible outcome data (n = {nrow(datos_exclud_time_eventd)} [{round(100 * nrow(datos_exclud_time_eventd)/nrow(data_eleg), 1)}%])\n',
+                                   '{nrow(datos_exclud_eventd_na)} ({round(100 * nrow(datos_exclud_eventd_na)/nrow(data_eleg), 1)}%) without time-to-event outcome data\n',
+                                   '{nrow(datos_exclud_time_implau)} ({round(100 * nrow(datos_exclud_time_implau)/nrow(data_eleg), 1)}%) with implausible (negative) or irrelevant (zero) event times')),
+           size = text_size) +
+  # vertical arrow
+  geom_segment(x = text_param(box_xmin, box_xmax), xend = text_param(box_xmin, box_xmax),
+               y = 93, yend = 74,
+               size = 0.15,
+               linejoin = "mitre",
+               lineend = "butt",
+               arrow = arrow(length = unit(1, "mm"), type = "closed")) +
+    # vertical arrow
+  geom_segment(x = text_param(box_xmin, box_xmax), xend = text_param(box_xmin, box_xmax),
+               y = 65, yend = 50,
+               size = 0.15,
+               linejoin = "mitre",
+               lineend = "butt",
+               arrow = arrow(length = unit(1, "mm"), type = "closed")) +
+  geom_segment(x = text_param(box_xmin, box_xmax), xend = text_param(box_xmin, box_xmax),
+               y = 43, yend = 25,
+               size = 0.15,
+               linejoin = "mitre",
+               lineend = "butt") +
+  # horizontal arrow 1-->
+  geom_segment(x = text_param(box_xmin, box_xmax), xend = box_xmin + 23,
+               y = text_param(box_ymin - 19 + 2, box_ymax - 12 + 2), yend = text_param(box_ymin - 19 + 2, box_ymax - 12 + 2),
+               size = 0.15,
+               linejoin = "mitre",
+               lineend = "butt",
+               arrow = arrow(length = unit(1, "mm"), type = "closed")) +
+  # horizontal arrow 2-->
+  geom_segment(x = text_param(box_xmin, box_xmax), xend = box_xmin + 23,
+               y = text_param(box_ymin - 19 - 45, box_ymax - 12 - 45), yend = text_param(box_ymin - 19 - 45, box_ymax - 12 - 45),
+               size = 0.15,
+               linejoin = "mitre",
+               lineend = "butt",
+               arrow = arrow(length = unit(1, "mm"), type = "closed")) +
+  # horizontal arrow 2-->
+  geom_segment(x = text_param(box_xmin, box_xmax), xend = box_xmin + 23,
+               y = text_param(box_ymin - 19 - 25 + 1, box_ymax - 12 - 25 + 1), yend = text_param(box_ymin - 19 - 25 + 1, box_ymax - 12 - 25 + 1),
+               size = 0.15,
+               linejoin = "mitre",
+               lineend = "butt",
+               arrow = arrow(length = unit(1, "mm"), type = "closed")) +
+  # vertical arrow -->
+  geom_segment(x = text_param(box_xmin, box_xmax), xend = text_param(box_xmin, box_xmax),
+               y = 25, yend = box_ymax - 79,
+               size = 0.15,
+               linejoin = "mitre",
+               lineend = "butt",
+               arrow = arrow(length = unit(1, "mm"), type = "closed")) +
+  theme_void() +
+  theme(plot.background = element_rect(fill = "white")) -> plot_flowchart
+
+ggsave(filename = "plot_flowchart_english.jpeg",
+       plot = plot_flowchart,
+       device = "jpeg",
+       path = here("Figures", "Sensitivity-woWinsorize"),
+       scale = 1,
+       width = 12,
+       height = 12,
+       units = "cm",
+       dpi = 1000)
+
+```
+
+```{r}
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "plot_flowchart_english.jpeg"))
+```
+
+## Data Distribution by Region
+
+```{r}
+data |> 
+  mutate(inclusion = case_when(age >= 18 & time > 0 & ckd_stage == "Stages 3-4" ~ "Incluido", 
+                               TRUE ~ "No incluido"), 
+         cas = fct_rev(fct_infreq(cas))) |> 
+  ggplot(aes(x = cas, fill = factor(inclusion, level = c("Incluido", "No incluido")))) + 
+  geom_bar() +  
+  labs(fill = "Inclusión", x = NULL, y = "Frecuencia absoluta") + 
+  coord_flip(expand = FALSE) + 
+  scale_y_continuous(limits = c(0, 30000)) + 
+  theme_bw() -> p1 
+
+data |> 
+  mutate(inclusion = case_when(age >= 18 & time > 0 & ckd_stage == "Stages 3-4" ~ "Incluido", 
+                               TRUE ~ "No incluido"), 
+         cas = fct_rev(fct_infreq(cas))) |> 
+  ggplot(aes(x = cas, fill = factor(inclusion, level = c("Incluido", "No incluido")))) + 
+  geom_bar(position = "fill") +  
+  labs(fill = "Inclusión", x = NULL, y = "Proporción") + 
+  coord_flip(expand = FALSE) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw()  + 
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) -> p2
+
+data |> 
+  mutate(inclusion = case_when(age >= 18 & time > 0 & ckd_stage == "Stages 3-4" ~ "Incluido", 
+                               TRUE ~ "No incluido"), 
+         cas = fct_rev(fct_infreq(cas))) |> 
+  filter(inclusion == "Incluido") |> 
+  ggplot(aes(x = cas)) + 
+  geom_bar(fill = "#F8766D") +  
+  labs(x = NULL, y = "Frecuencia absoluta") + 
+  coord_flip(expand = FALSE) + 
+  scale_y_continuous(limits = c(0, 11000)) + 
+  theme_bw() + 
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) -> p3
+
+(p1 | p3 | p2) + 
+  plot_layout(guides = "collect") -> plot_region
+
+ggsave(filename = "plot_region.jpeg", 
+       plot = plot_region, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize"), 
+       scale = 2, 
+       width = 12,
+       height = 9, 
+       units = "cm", 
+       dpi = 1000, 
+       bg = "white") 
+```
+
+```{r}
+#| echo: false
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "plot_region.jpeg"))
+```
+
+## Selection of Patients Included in the Study
+
+```{r}
+data %>%  
+  # Criterio de seleccion
+  filter(age >= 18, time > 0) |> 
+  filter(ckd_stage == "Stages 3-4") -> dataA
+```
+
+
+```{r}
+dataA |> 
+  # Preparacion de datos
+  select(cas, sex, age, hta, dm, crea, ckd_stage2, 
+         eGFR_ckdepi, acr, urine_album, 
+         urine_crea, time5y, eventd5y, 
+         grf_cat, acr_cat, ckd_class,
+         death2y, eventd2ylab, death5y, 
+         eventd5ylab, eventd, time) |> 
+  mutate(hta = factor(hta), 
+         dm = factor(dm),
+         cas2 = case_when(cas %in% c("Lima - Rebagliati", "Lima - Almenara", "Lima - Sabogal") ~ "Lima", 
+                          TRUE ~ "Otras Redes"), 
+         cas = fct_rev(fct_infreq(cas)), 
+         cas2 = fct_rev(fct_infreq(cas2))
+  ) |> 
+  # rowwise() |> 
+  mutate(
+    acr = Winsorize(acr, val = quantile(dataA$acr, 
+                                         probs = c(0.015, 0.985), 
+                                         na.rm = TRUE)), 
+    urine_album = Winsorize(urine_album , val = quantile(dataA$urine_album, 
+                                         probs = c(0.015, 0.985), 
+                                         na.rm = TRUE)),
+    urine_crea = Winsorize(urine_crea, val = quantile(dataA$urine_crea, 
+                                                       probs = c(0.015, 0.985), 
+                                                       na.rm = TRUE))) |> 
+  # ungroup() |> 
+  mutate(         eventd2ylab = factor(eventd2ylab, 
+                                       levels = c("Alive w/o Kidney Failure", 
+                                                  "Kidney Failure", 
+                                                  "Death w/o Kidney Failure")), 
+                  eventd5ylab = factor(eventd5ylab, 
+                                       levels = c("Alive w/o Kidney Failure", 
+                                         "Kidney Failure", 
+                                         "Death w/o Kidney Failure"))) -> dataA
+```
+
+## Load User-Written Functions
+
+```{r}
+source(here("Code", "source", "kfre_pi.R"))
+source(here("Code", "source", "kfre_pr.R"))
+source(here("Code", "source", "oe_ratio.R"))
+source(here("Code", "source", "calibration_intercept.R"))
+source(here("Code", "source", "calibration_slope.R"))
+source(here("Code", "source", "auc.R"))
+source(here("Code", "source", "validate.mids.R"))
+source(here("Code", "source", "pool.validate.mids.R"))
+source(here("Code", "source", "pool.auc.mids.R"))
+source(here("Code", "source", "predict.mira.R"))
+source(here("Code", "source", "process_imp_cal_plot.R"))
+```
+
+## Creation of Cause-Specific Cumulative Hazard Using the Nelson-Aalen Estimator
+
+```{r}
+cumhaz1 <- basehaz(coxph(Surv(time, eventd == 1) ~ 1, data = dataA)) |> 
+  rename(cumhaz1 = hazard)
+cumhaz2 <- basehaz(coxph(Surv(time, eventd == 2) ~ 1, data = dataA))|> 
+  rename(cumhaz2 = hazard)
+
+dataA <- dataA |> 
+  left_join(cumhaz1, by = "time") |> 
+  left_join(cumhaz2, by = "time")
+```
+
+## Data Preparation
+
+```{r}
+dataA_imp <- dataA |> 
+  mutate(eventdf = factor(eventd, levels = c(0, 1, 2))) |> 
+  select(-ckd_class, -acr_cat) |> 
+  mutate(
+    sex_cumhaz1 = as.integer(sex == "Masculino") * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    age_cumhaz1 = (age - mean(age, na.rm = TRUE)) * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    eGFR_ckdepi_cumhaz1 = (eGFR_ckdepi - mean(eGFR_ckdepi, na.rm = TRUE)) * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    sex_cumhaz2 = as.integer(sex == "Masculino") * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    age_cumhaz2 = (age - mean(age, na.rm = TRUE)) * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    eGFR_ckdepi_cumhaz2 = (eGFR_ckdepi - mean(eGFR_ckdepi, na.rm = TRUE)) * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    log_urine_crea = log(urine_crea), 
+    log_urine_album = if_else(is.infinite(log(urine_album)), NA, log(urine_album)),
+    log_acr = log(acr), 
+    log_acr_cumhaz1 = (log_acr - mean(log_acr, na.rm = TRUE)) * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    log_urine_crea_cumhaz1 = (log_urine_crea - mean(log_urine_crea, na.rm = TRUE)) * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    log_urine_album_cumhaz1 = (log_urine_album - mean(log_urine_album, na.rm = TRUE)) * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    log_acr_cumhaz2 = (log_acr - mean(log_acr, na.rm = TRUE)) * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    log_urine_crea_cumhaz2 = (log_urine_crea - mean(log_urine_crea, na.rm = TRUE)) * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    log_urine_album_cumhaz2 = (log_urine_album - mean(log_urine_album, na.rm = TRUE)) * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    hta_cumhaz1 = as.integer(hta == 1) * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    hta_cumhaz2 = as.integer(hta == 1) * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    dm_cumhaz1 = as.integer(dm == 1) * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    dm_cumhaz2 = as.integer(dm == 1) * (cumhaz2 - mean(cumhaz2, na.rm = TRUE)), 
+    cas2_cumhaz1 = as.integer(cas2 == "Lima") * (cumhaz1 - mean(cumhaz1, na.rm = TRUE)), 
+    cas2_cumhaz2 = as.integer(cas2 == "Lima") * (cumhaz2 - mean(cumhaz2, na.rm = TRUE))
+  ) |> 
+  select(-urine_crea, -urine_album, -acr) |> 
+  relocate(all_of(c("hta", "dm", "log_urine_crea", "log_acr", "log_urine_album")), 
+           .after = eGFR_ckdepi_cumhaz2)
+
+saveRDS(dataA_imp, here("Data", "Tidy", "Sensitivity-woWinsorize", "dataA_imp.rds"))
+```
+
+## Exploration of Missing Data
+
+- The variables to be considered are shown below:
+
+```{r}
+dataA |> 
+  glimpse()
+```
+
+- The amount of missing data by variable is as follows:
+
+::: {.panel-tabset}
+
+### Missing by Variable
+
+```{r}
+dataA |> 
+  select(-c(ckd_stage2, time5y, eventd5y, acr_cat, 
+            death2y, eventd2ylab, death5y, eventd5ylab, time, cas)) |> 
+  miss_var_summary() |> 
+  kbl()
+```
+
+### Pattern
+
+Below is a graph showing the pattern of missing data. We can observe a general missing data pattern, characterized by multivariate missing data. No monotone pattern of missing data is observed (as expected), and there is no evidence of file matching. Additionally, the missing data exhibits a connected pattern at both the row and column levels.
+
+```{r}
+dataA |> 
+  select(-c(ckd_stage2, time5y, eventd5y, acr_cat, ckd_class,
+            death2y, eventd2ylab, death5y, eventd5ylab, time, cas)) |> 
+  plot_pattern(rotate = TRUE) -> plot_patterns
+
+ggsave(filename = "plot_patterns.jpeg", 
+       plot = plot_patterns, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic"), 
+       scale = 2, 
+       width = 9,
+       height = 9, 
+       units = "cm", 
+       dpi = 1000, 
+       bg = "white") 
+```
+
+```{r}
+#| echo: false
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic", "plot_patterns.jpeg"))
+```
+
+## Influx - outflux
+
+```{r}
+dataA |> 
+  select(-c(ckd_stage2, time5y, eventd5y, acr_cat, ckd_class,
+            death2y, eventd2ylab, death5y, eventd5ylab, cas)) |> 
+  plot_flux(label = FALSE) -> plot_influx
+
+# Primero, averiguamos cuántas capas hay.
+num_layers <- length(plot_influx$layers)
+
+# Examinamos cada capa para encontrar la geom_point() que no deseamos.
+# Esto imprimirá las capas y deberías buscar la que contiene la geom_point sin shape.
+for (i in 1:num_layers) {
+  print(plot_influx$layers[[i]])
+}
+
+
+# Eliminamos la capa geom_point que no queremos.
+# La salida muestra que es la segunda capa, así que la eliminamos.
+plot_influx$layers <- plot_influx$layers[-2] 
+
+# Asegúrate de tener suficientes formas para cada nivel único de la variable.
+unique_vrbs <- unique(plot_influx$data$vrb)
+shapes <- seq_along(unique_vrbs)
+
+# Ahora deberías volver a agregar la capa geom_point con las formas y colores adecuados.
+plot_influx <- plot_influx + 
+  geom_jitter(aes(shape = vrb, colour = vrb), width = 0.025, height = 0.025) +
+  scale_shape_manual(values = shapes) +
+  guides(colour = guide_legend(override.aes = list(shape = shapes)),
+         shape = FALSE)
+
+ggsave(filename = "plot_influx.jpeg", 
+       plot = plot_influx, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic"), 
+       scale = 2, 
+       width = 9,
+       height = 9, 
+       units = "cm", 
+       dpi = 1000, 
+       bg = "white") 
+```
+
+```{r}
+#| echo: false
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic", "plot_influx.jpeg"))
+```
+
+## By region
+
+```{r}
+dataA |> 
+  mutate(miss_acr = if_else(is.na(acr), "Missing", "Completo"), 
+         miss_acr = factor(miss_acr, level = c("Completo", "Missing"))) |> 
+  ggplot(aes(x = cas, fill = miss_acr)) + 
+  geom_bar(position = "fill") +  
+  labs(fill = "Datos perdidos", x = NULL, y = "Proporción") + 
+  coord_flip(expand = FALSE) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() -> p1
+
+dataA |> 
+  mutate(miss_acr = if_else(is.na(acr), "Missing", "Completo"), 
+         miss_acr = factor(miss_acr, level = c("Completo", "Missing"))) |> 
+  ggplot(aes(x = cas, fill = miss_acr)) + 
+  geom_bar() +  
+  labs(fill = "Datos perdidos", x = NULL, y = "Frecuencia absoluta") + 
+  coord_flip(expand = FALSE) + 
+  scale_y_continuous(limits = c(0, 10000)) + 
+  theme_bw()  -> p2
+
+(p1 | p2) + plot_layout(guides = "collect") -> plot_region_missing
+
+ggsave(filename = "plot_region_missing.jpeg", 
+       plot = plot_region_missing, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic"), 
+       scale = 2, 
+       width = 16,
+       height = 8, 
+       units = "cm", 
+       dpi = 1000, 
+       bg = "white") 
+```
+
+```{r}
+#| echo: false
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic", "plot_region_missing.jpeg"))
+```
+
+```{r}
+dataA |> 
+  mutate(miss_acr = if_else(is.na(acr), "Missing", "Completo"), 
+         miss_acr = factor(miss_acr, level = c("Completo", "Missing"))) |> 
+  ggplot(aes(x = cas2, fill = miss_acr)) + 
+  geom_bar(position = "fill") +  
+  labs(fill = "Datos perdidos", x = NULL, y = "Proporción") + 
+  coord_flip(expand = FALSE) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() -> p1
+
+dataA |> 
+  mutate(miss_acr = if_else(is.na(acr), "Missing", "Completo"), 
+         miss_acr = factor(miss_acr, level = c("Completo", "Missing"))) |> 
+  ggplot(aes(x = cas2, fill = miss_acr)) + 
+  geom_bar() +  
+  labs(fill = "Datos perdidos", x = NULL, y = "Frecuencia absoluta") + 
+  coord_flip(expand = FALSE) + 
+  scale_y_continuous(limits = c(0, 16000)) + 
+  theme_bw()  -> p2
+
+(p1 | p2) + plot_layout(guides = "collect") -> plot_region_missing
+
+ggsave(filename = "plot_region_missing2.jpeg", 
+       plot = plot_region_missing, 
+       device = "jpeg", 
+       path = here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic"), 
+       scale = 2, 
+       width = 16,
+       height = 6, 
+       units = "cm", 
+       dpi = 1000, 
+       bg = "white") 
+```
+
+```{r}
+#| echo: false
+knitr::include_graphics(here("Figures", "Sensitivity-woWinsorize", "Imputation_Diagnostic", "plot_region_missing2.jpeg"))
+```
+
+:::
+
+## Ticket de Reprocubilidad
+
+```{r}
+#| label: repro_ticket
+#| column: page
+#| echo: true
+sessionInfo()
+```
+

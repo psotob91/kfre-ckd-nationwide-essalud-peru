@@ -1,0 +1,10 @@
+library(quarto)
+library(here)
+
+quarto_render(here("Code", "Sensitivity-woWinsorize", "1_IDA.qmd"))
+quarto_render(here("Code", "Sensitivity-woWinsorize", "2_Imputacion_Multiple.qmd"))
+quarto_render(here("Code", "Sensitivity-woWinsorize", "3_Descriptive.qmd"))
+quarto_render(here("Code", "Sensitivity-woWinsorize", "4_Val_Externa_Imputation.qmd"))
+quarto_render(here("Code", "Sensitivity-woWinsorize", "5_Model_Recal_Imputed.qmd"))
+quarto_render(here("Code", "Sensitivity-woWinsorize", "6_Val_Interna_Recal_Methods.qmd"))
+quarto_render(here("Code", "Sensitivity-woWinsorize", "7_Util_Clinica.qmd"))
